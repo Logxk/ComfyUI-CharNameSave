@@ -139,16 +139,53 @@ class BareNameFunctionTests(_IndexSwapMixin):
         self.assertIsNone(node._character_bare_name("2", EXACT))
         self.assertIsNone(node._character_bare_name("2022", EXACT))
 
-    def test_fuzzy_match_tolerates_typos(self):
+    def test_fuzzy_match_tolerates_same_length_typo(self):
+        # 模糊约束：长度差 <= 1、首字母相同、长度 >= 4、不在停用表、cutoff >= 0.92
         self.assertEqual(node._character_bare_name("hakurei reimuu", FUZZY), "hakurei_reimu")
 
+    def test_fuzzy_rejects_stage_like_tags(self):
+        """第三轮修复：stage 曾被误判为角色 sage（相似度 ≈ 0.888）。"""
+        # 停用表直接拦下
+        self.assertIsNone(node._character_bare_name("stage", FUZZY))
+        self.assertIsNone(node._character_bare_name("stage lights", FUZZY))
+        self.assertIsNone(node._character_bare_name("live house", FUZZY))
+        self.assertIsNone(node._character_bare_name("playing guitar", FUZZY))
+        self.assertIsNone(node._character_bare_name("looking at each other", FUZZY))
+        # 即便不在停用表里，长度差 > 1 的近似词也不接受
+        self.assertIsNone(node._fuzzy_candidate_matches("stge", FUZZY))
+
+    def test_fuzzy_constraints_helpers(self):
+        # 低于最低长度
+        self.assertIsNone(node._fuzzy_candidate_matches("abc", FUZZY))
+        # 停用词
+        self.assertIsNone(node._fuzzy_candidate_matches("stage", FUZZY))
+        # 关闭 / 精确模式不做模糊匹配
+        self.assertIsNone(node._fuzzy_candidate_matches("hakurei reimuu", OFF))
+        self.assertIsNone(node._fuzzy_candidate_matches("hakurei reimuu", EXACT))
+
     def test_fuzzy_short_tag_is_ignored(self):
-        # "2b" is 2 chars -> below _FUZZY_MIN_LEN, so no fuzzy guessing
+        # 低于 _BARE_NAME_MIN_LEN(4) 的 tag 不参与模糊匹配
         self.assertIsNone(node._character_bare_name("zb", FUZZY))
+        self.assertIsNone(node._character_bare_name("emi", FUZZY))
 
     def test_fuzzy_never_matches_noise(self):
-        for tag in ("1girl", "masterpiece", "long hair", "zzzzzz"):
+        for tag in ("1girl", "masterpiece", "long hair", "zzzzzz", "2girls",
+                    "stage lights", "detailed background"):
             self.assertIsNone(node._character_bare_name(tag, FUZZY), tag)
+
+    def test_fuzzy_cutoff_is_strict(self):
+        # cutoff 已从 0.85 提高到 0.92
+        self.assertGreaterEqual(node._FUZZY_CUTOFF, 0.92)
+        self.assertEqual(node._FUZZY_MAX_LEN_DIFF, 1)
+        self.assertEqual(node._BARE_NAME_MIN_LEN, 4)
+        for required in ("stage", "stage lights", "live house", "guitar",
+                         "playing guitar", "singing", "smiling", "blush",
+                         "looking at viewer", "looking at each other",
+                         "holding hands", "standing", "sitting", "walking",
+                         "classroom", "park", "beach", "night", "sunset",
+                         "dynamic angle", "detailed background",
+                         "school uniform", "casual clothes"):
+            self.assertIn(required, node._BARE_NAME_STOPWORDS)
 
     def test_empty_index_disables_everything(self):
         node._CHARACTER_INDEX.clear()
@@ -159,8 +196,8 @@ class BareNameFunctionTests(_IndexSwapMixin):
 
 class AutoCandidateTests(_IndexSwapMixin):
 
-    def candidates(self, texts, bare_mode=OFF, character_list=None):
-        return list(node._auto_candidates(list(texts), bare_mode, character_list))
+    def candidates(self, texts, bare_mode=OFF):
+        return list(node._auto_candidates(list(texts), bare_mode))
 
     def test_off_mode_is_unchanged(self):
         self.assertEqual(
@@ -189,16 +226,6 @@ class AutoCandidateTests(_IndexSwapMixin):
             [],
         )
 
-    def test_character_list_matches_before_dataset(self):
-        # the name as written in the list is kept ("CustomChar" -> CustomChar)
-        self.assertEqual(
-            self.candidates(["1girl, customchar, solo"], OFF, ["CustomChar"]),
-            ["CustomChar"],
-        )
-
-    def test_character_list_is_skipped_for_artist_tags(self):
-        self.assertEqual(self.candidates(["by customchar"], OFF, ["customchar"]), [])
-
     def test_mixed_rounds_order(self):
         self.assertEqual(
             self.candidates(
@@ -211,50 +238,64 @@ class AutoCandidateTests(_IndexSwapMixin):
 
 class CharNamesTests(_IndexSwapMixin):
 
-    def test_max_tags_limits_bare_matches(self):
+    def test_all_bare_names_are_collected(self):
+        # 第三轮移除 max_tags：全部收集，不再截断
         self.assertEqual(
-            node._char_names(["emilia, rem, frieren"], True, 2, EXACT),
-            ["emilia", "rem"],
+            node._char_names(["emilia, rem, frieren"], EXACT),
+            ["emilia", "rem", "frieren"],
         )
 
     def test_char_tag_still_wins(self):
         self.assertEqual(
-            node._char_names(["char:my_own_name, emilia"], True, 3, EXACT),
+            node._char_names(["char:my_own_name, emilia"], EXACT),
             ["my_own_name"],
         )
 
-    def test_auto_extract_disabled_ignores_bare_names(self):
-        self.assertEqual(node._char_names(["emilia, rem"], False, 3, EXACT), [])
+    def test_off_mode_ignores_bare_names(self):
+        self.assertEqual(node._char_names(["emilia, rem"], OFF), [])
 
-    def test_character_list_parameter(self):
+    def test_parent_child_dedupe(self):
+        # 同一角色以 name 与 name (series) 同时出现 -> 保留更长的那条
         self.assertEqual(
-            node._char_names(["1girl, myoc, solo"], True, 2, OFF, ["myoc"]),
-            ["myoc"],
+            node._char_names(["denia, denia (wuthering waves)"], OFF),
+            ["denia_(wuthering_waves)"],
         )
 
-    def test_split_character_list_separators(self):
-        self.assertEqual(node._split_character_list("a, b;c\nd  ,, e"), ["a", "b", "c", "d", "e"])
-        self.assertEqual(node._split_character_list(""), [])
-        self.assertEqual(node._split_character_list(None), [])
-        self.assertEqual(node._split_character_list(["a,b", " c "]), ["a", "b", "c"])
+    def test_over_limit_is_capped(self):
+        text = ", ".join(f"char:c{i}" for i in range(20))
+        self.assertEqual(len(node._char_names([text], OFF)), node._MAX_AUTO_NAMES)
 
 
 class InputTypesTests(unittest.TestCase):
 
-    def test_new_widgets_exist_with_chinese_modes(self):
-        required = node.CharNameSaveImage.INPUT_TYPES()["required"]
-        self.assertEqual(required["bare_name_mode"][0], ["关闭", "数据集精确匹配", "数据集模糊匹配"])
-        self.assertEqual(required["bare_name_mode"][1]["default"], "关闭")
-        self.assertEqual(required["character_list"][1]["default"], "")
-        self.assertEqual(required["character_list"][1]["multiline"], True)
-        # original parameters are still there
-        for key in ("images", "mode", "auto_extract", "max_tags", "padding", "fallback_name"):
-            self.assertIn(key, required)
+    def test_panel_has_exactly_the_six_expected_widgets(self):
+        """第三轮精简后的节点面板：除这 6 项外不应出现任何其它控件。"""
+        types_ = node.CharNameSaveImage.INPUT_TYPES()
+        required = types_["required"]
+        optional = types_["optional"]
+        self.assertEqual(list(required), ["images", "mode", "bare_name_mode",
+                                          "padding", "fallback_name"])
+        self.assertEqual(list(optional), ["positive_text"])
+        self.assertEqual(list(types_["hidden"]), ["prompt", "extra_pnginfo"])
 
-    def test_bare_name_mode_is_after_max_tags(self):
-        keys = list(node.CharNameSaveImage.INPUT_TYPES()["required"])
-        self.assertLess(keys.index("max_tags"), keys.index("bare_name_mode"))
-        self.assertLess(keys.index("bare_name_mode"), keys.index("character_list"))
+    def test_removed_widgets_are_gone(self):
+        types_ = node.CharNameSaveImage.INPUT_TYPES()
+        flat = list(types_["required"]) + list(types_["optional"])
+        for removed in ("auto_extract", "max_tags", "character_list",
+                        "enable_multi_group", "group_tags"):
+            self.assertNotIn(removed, flat, removed)
+
+    def test_defaults(self):
+        required = node.CharNameSaveImage.INPUT_TYPES()["required"]
+        self.assertEqual(required["mode"][1]["default"], "按角色分组文件夹")
+        self.assertEqual(required["bare_name_mode"][0],
+                         ["关闭", "数据集精确匹配", "数据集模糊匹配"])
+        self.assertEqual(required["bare_name_mode"][1]["default"], "数据集模糊匹配")
+        self.assertEqual(required["padding"][1]["default"], 5)
+        self.assertEqual(required["fallback_name"][1]["default"], "ComfyUI")
+        self.assertEqual(required["images"][0], "IMAGE")
+        self.assertIs(node.CharNameSaveImage.INPUT_TYPES()["optional"]["positive_text"][1]["forceInput"],
+                      True)
 
 
 class SaveImagesBareModeTests(_IndexSwapMixin):
@@ -281,23 +322,37 @@ class SaveImagesBareModeTests(_IndexSwapMixin):
         return result["ui"]["images"][0]["filename"], result["ui"]["text"][0]
 
     def test_bare_name_names_the_file(self):
-        filename, display = self._save("masterpiece, 1girl, emilia, solo", bare_name_mode="数据集精确匹配")
-        # 二期起采用「短名优先」：裸名识别不再补作品名，避免多角色文件名过长
+        # 默认「按角色分组文件夹」：emilia 落到 output/emilia/emilia_00001_.png
+        filename, display = self._save("masterpiece, 1girl, emilia, solo",
+                                       bare_name_mode="数据集精确匹配")
         self.assertEqual(filename, "emilia_00001_.png")
         self.assertIn("emilia", display)
 
-    def test_default_mode_is_unchanged(self):
+    def test_bare_name_file_mode(self):
+        filename, display = self._save("masterpiece, 1girl, emilia, solo",
+                                       mode="按角色命名文件",
+                                       bare_name_mode="数据集精确匹配")
+        self.assertEqual(filename, "emilia_00001_.png")
+        self.assertIn("emilia", display)
+
+    def test_default_widgets_use_fuzzy_mode(self):
+        # 面板默认值：按角色分组文件夹 + 数据集模糊匹配
         filename, display = self._save("masterpiece, 1girl, emilia, solo")
+        self.assertEqual(filename, "emilia_00001_.png")
+        self.assertIn("emilia", display)
+
+    def test_off_mode_uses_fallback(self):
+        filename, display = self._save("masterpiece, 1girl, emilia, solo",
+                                       bare_name_mode="关闭")
         self.assertEqual(filename, "ComfyUI_00001_.png")
         self.assertIn("未识别到角色名", display)
 
-    def test_character_list_argument(self):
-        filename, _ = self._save("1girl, myoc, solo", character_list="myoc, other")
-        self.assertEqual(filename, "myoc_00001_.png")
-
-    def test_character_list_accepts_workflow_list_value(self):
-        filename, _ = self._save("1girl, myoc, solo", character_list=["myoc", "other"])
-        self.assertEqual(filename, "myoc_00001_.png")
+    def test_removed_arguments_are_ignored(self):
+        # 旧工作流里遗留的控件值不会导致报错（面板已移除这些参数）
+        filename, _ = self._save("masterpiece, 1girl, emilia, solo",
+                                 auto_extract=True, max_tags=1, character_list="myoc",
+                                 enable_multi_group=True, group_tags="双人,多人")
+        self.assertEqual(filename, "emilia_00001_.png")
 
 
 class _FakeTensor:

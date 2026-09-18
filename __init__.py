@@ -48,10 +48,46 @@ _CHARACTER_INDEX = {}
 _CHARACTER_NAMES_LOWER = set()
 # 精确匹配用：规范化后的 tag -> 原始 dataset name（保住 "_(作品名)" 后缀写法）
 _CHARACTER_NAME_LOOKUP = {}
-# 模糊匹配 >= n 个字符，避免 "a" / "rei" 这类短词误命中
-_FUZZY_MIN_LEN = 3
-# 模糊匹配阈值（difflib.get_close_matches 的 cutoff，越大越严格）
-_FUZZY_CUTOFF = 0.85
+# 模糊匹配最低长度：**第三轮修复**——"stage" 被误匹配成角色 "sage" 的触发案例，
+# 短标签必须直接排除，避免 4 字以下的通用词参与模糊匹配。
+_BARE_NAME_MIN_LEN = 4
+# 模糊匹配阈值（difflib.get_close_matches 的 cutoff，越大越严格）。
+# 第三轮从 0.85 提到 0.92：stage/sage 的相似度约 0.888，0.85 会命中、0.92 不会。
+_FUZZY_CUTOFF = 0.92
+# 模糊匹配的长度容差：候选角色名与 tag 的长度差超过这个值就不算匹配
+_FUZZY_MAX_LEN_DIFF = 1
+# 通用 tag / 场景词停用表：这些词**永不参与模糊匹配**（精确匹配仍然有效）。
+# 第三轮修复的核心之一：stage、live house、guitar 之类的词与角色名形近，
+# 例如 "stage" -> "sage"（相似度 8/9 ≈ 0.888）。
+# 表里统一用 _dataset_key 归一化后的写法（小写 + 下划线转空格）。
+_BARE_NAME_STOPWORDS = frozenset({
+    # 与测试提示词相关的场景/动作词（第三轮触发案例）
+    "stage", "stage lights", "live house", "livehouse", "guitar",
+    "playing guitar", "playing guitar together", "singing", "smiling",
+    "blush", "looking at viewer", "looking at each other", "holding hands",
+    "standing", "sitting", "walking", "classroom", "park", "beach",
+    "night", "sunset", "dynamic angle", "detailed background",
+    "school uniform", "casual clothes",
+    # 常见通用/构图 tag，同样不该被猜成角色
+    "looking back", "looking down", "looking up", "looking away",
+    "from above", "from below", "from behind", "from side", "upper body",
+    "full body", "cowboy shot", "close-up", "portrait", "outdoors", "indoors",
+    "day", "evening", "sky", "clouds", "water", "tree", "trees", "flower",
+    "flowers", "window", "bed", "chair", "table", "sky", "simple background",
+    "white background", "gradient background", "depth of field", "bokeh",
+    "lens flare", "wide shot", "long hair", "short hair", "red hair",
+    "pink hair", "blue hair", "yellow hair", "black hair", "white hair",
+    "brown hair", "blonde hair", "green hair", "purple hair", "grey hair",
+    "silver hair", "orange hair", "hair ornament", "hair bobbles",
+    "hair ribbon", "side ponytail", "ponytail", "twintails", "braid",
+    "track jacket", "track pants", "pleated skirt", "school bag", "uniform",
+    "red ribbon", "ribbon", "jacket", "skirt", "pants", "shirt", "dress",
+    "2girls", "3girls", "1girl", "1boy", "2boys", "multiple girls",
+    "multiple boys", "solo", "solo focus", "couple", "hetero", "yuri",
+    "masterpiece", "best quality", "highres", "absurdres", "ultra detailed",
+    "very aesthetic", "official art", "anime style", "photorealistic",
+    "artist name", "watermark", "signature", "english text", "japanese text",
+})
 # 尾部 "_xxx)" 或 " xxx)" 后缀：danbooru 用来消歧的 costume/版本名
 _DISAMBIG_SUFFIX_RE = re.compile(r"[_\s]\(([^()]*)\)$")
 # 数据集里 `name` 本身是否已带 "_(xxx)" 后缀（danbooru 常见消歧写法）
@@ -87,15 +123,20 @@ _META_SERIES_TAG_RE = re.compile(r"^(?P<name>[^()]+?)[_\s]*\(\s*(?P<meta>[^()]*?
 # 匹配裸名字（判断兜底是否像个人名）：字母/数字/下划线/连字符/空格/点
 _PLAIN_NAME_RE = re.compile(r"^[\w'\-.\s]+$", re.UNICODE)
 
-# --- 多角色分组（问题 1） ------------------------------------------------------
-# name 数量 -> 外层分组目录：2 个角色进「双人」，3 个及以上进「多人」。
+# --- 多角色分组 ----------------------------------------------------------------
+# 分组标签**写死**在这里（UI 参数已按第三轮要求移除）：
+#   name 数量 == 2 -> _MULTI_GROUP_TAGS[0]（Duo）
+#   name 数量 >= 3 -> _MULTI_GROUP_TAGS[1]（Group）
+# 用英文目录名，避免中文路径在某些环境 / 外部工具下的兼容性问题
+# （例如 zip 编码、git、同步盘、Linux 挂载盘把中文变成乱码）。
 # 多角色时子目录/文件名里的角色名会做确定性排序（忽略大小写），因此同一条提示词
 # 无论 tag 顺序怎么变，都落在同一个文件夹里，不再产生目录碎片。
 # 注意：0 个角色（兜底命名）与 1 个角色（单角色命名）完全不分组，保持旧行为。
-_MULTI_GROUP_PARENTS = {2: "双人", 3: "多人"}
-_MULTI_GROUP_FALLBACK = ["双人", "多人"]
+_MULTI_GROUP_TAGS = ("Duo", "Group")
 # 多角色拼接后的长度上限（与单角色的 150 保持一致，避免超长路径）
 _MULTI_NAME_MAX_LEN = 150
+# 自动识别角色数量上限：超过这个数量视为异常提示词，只取前 N 个并打 warning
+_MAX_AUTO_NAMES = 8
 
 
 def _dataset_key(name):
@@ -265,13 +306,13 @@ def _series_name_text(tag):
     return None
 
 
-def _character_name_from_tag(tag, character_list=None):
+def _character_name_from_tag(tag):
     """从单个 tag 提取角色名，返回 "name (series)"（已清洗），拿不到返回 None。
 
     两种分支：
     1. **元标签分支**：tag 形如 "<name> (cosplay)" / "<name>_(alternate_costume)"
        （括号里是 _META_SERIES 里的元标签）时，绝不把 cosplay 当作品名。改为：
-       先用 _resolve_character_name 做名单/数据集校验（命中就用数据集里的规范短名，
+       先用 _resolve_character_name 做数据集校验（命中就用数据集里的规范短名，
        多为 kita_ikuyo 这种短名字）；校验不通过时按 _META_SERIES_KEEP_NAME 决定是
        否仍采用括号前的裸名，并统一追加 _META_SERIES_SUFFIX（默认 "_cosplay"）。
     2. **原有分支**：普通 "name (series)" 结构，输出 "name (series)"，行为与旧版一致。
@@ -284,12 +325,11 @@ def _character_name_from_tag(tag, character_list=None):
     # --- 分支 1：<name> (cosplay) 等元标签，不能当作品名 ---
     meta_name, _meta = _meta_series_name(stripped)
     if meta_name:
-        resolved = _resolve_character_name(meta_name, _BARE_NAME_MODE_OFF, character_list)
+        resolved = _resolve_character_name(meta_name, _BARE_NAME_MODE_OFF)
         if resolved:
-            # 数据集 / 手动名单命中（名单里的人名长度不受 _META_SERIES_MIN_LEN 限制，
-            # 因为用户是显式声明的）；只有「凭感觉猜」的兜底才要求名字足够长。
+            # 数据集命中（元标签场景不要求名字长度，因为括号前的内容本身就是标签）
             return resolved
-        # 数据集/名单都没命中：兜底保留括号前的裸名 + cosplay 后缀
+        # 数据集没命中：兜底保留括号前的裸名 + cosplay 后缀（名字太短则不猜）
         if _META_SERIES_KEEP_NAME and _looks_like_character_name(meta_name):
             return _sanitize_name(meta_name + _META_SERIES_SUFFIX)
         return None
@@ -378,27 +418,55 @@ def _looks_like_character_name(name):
     return bool(_PLAIN_NAME_RE.match(name))
 
 
-def _character_list_names(character_list):
-    """把用户手填的「已知角色名名单」规范化成 (小写名 -> 原始名) 映射。"""
-    lookup = {}
-    for item in character_list or []:
-        if not isinstance(item, str):
+def _fuzzy_candidate_matches(key, mode):
+    """模糊匹配的候选筛选：返回**唯一**可接受的候选角色名，否则 None。
+
+    第三轮修复（触发案例："stage" 被误判为角色 "sage"，相似度 ≈ 8/9 ≈ 0.888）：
+    只有同时满足下面全部约束的候选才被接受，任何一条不满足都直接放弃：
+
+    1. **停用词**：tag 命中 _BARE_NAME_STOPWORDS（stage / live house / guitar /
+       looking at each other ... 等通用词与场景词）时，完全不参与模糊匹配；
+    2. **最低长度**：len(tag) >= _BARE_NAME_MIN_LEN（4），排除 sage、2girls 这类短词；
+    3. **长度接近**：abs(len(tag) - len(cand)) <= _FUZZY_MAX_LEN_DIFF（1），
+       stage(5) 与 sage(4) 差 1 虽然满足，但 stage 已在停用表里被拦下；
+    4. **首字母相同**：tag[0].lower() == cand[0].lower()；
+    5. **相似度**：difflib ratio >= _FUZZY_CUTOFF（0.92，比旧值 0.85 严格）。
+
+    另外：调用方会先做一次精确匹配（大小写不敏感，见 _dataset_lookup），
+    只有精确未命中才会走到这里。
+    """
+    if mode != _BARE_NAME_MODE_FUZZY:
+        return None
+    if not key or len(key) < _BARE_NAME_MIN_LEN:
+        return None
+    if key in _BARE_NAME_STOPWORDS:
+        return None
+
+    candidates = get_close_matches(key, _CHARACTER_NAMES_LOWER, n=3, cutoff=_FUZZY_CUTOFF)
+    for candidate in candidates:
+        if not candidate:
             continue
-        name = _unescape_tag(item).strip()
-        if not name or _is_artist_tag(name):
+        # 长度接近
+        if abs(len(key) - len(candidate)) > _FUZZY_MAX_LEN_DIFF:
             continue
-        lookup.setdefault(name.lower(), name)
-    return lookup
+        # 首字母相同
+        if key[0].lower() != candidate[0].lower():
+            continue
+        # 候选本身也必须达到最低长度（防止数据集里的短别名反向命中）
+        if len(candidate) < _BARE_NAME_MIN_LEN:
+            continue
+        return candidate
+    return None
 
 
 def _dataset_lookup(tag, mode=_BARE_NAME_MODE_EXACT):
     """在数据集索引里查 tag，返回 (原始记录 dict, 命中的索引键)，未命中返回 (None, None)。
 
     匹配顺序：
-    1. 完整 tag（"hakurei reimu (touhou)"，下划线/空格等价）；
-    2. 去掉尾部 "_(版本名/服装名)" 后缀的基础名（"hakurei reimu"，用于裸名识别）；
-    3. 仅当 mode == 数据集模糊匹配 时，再按 difflib 近似匹配（cutoff 0.85，
-       长度 < _FUZZY_MIN_LEN 的 tag 不参与，避免 "a" 这类短词误命中）。
+    1. **精确匹配**（大小写/下划线空格不敏感）完整 tag，如 "hakurei reimu (touhou)"；
+    2. 精确匹配去掉尾部 "_(版本名/服装名)" 后缀的基础名（如 "hakurei reimu"）；
+    3. 精确都没命中、且 mode == 数据集模糊匹配 时，才走 _fuzzy_candidate_matches
+       的近似匹配（带停用词 / 长度 / 首字母 / cutoff 约束）。
 
     返回值里的命中键用于区分「精确命中」与「模糊猜测」：只有精确命中数据集里的
     规范写法时才采用它的名字，模糊命中要保留用户/提示词里的原始拼写。
@@ -412,19 +480,20 @@ def _dataset_lookup(tag, mode=_BARE_NAME_MODE_EXACT):
     if not _CHARACTER_NAMES_LOWER:
         return None, None
 
+    # --- 1) 精确匹配（第三轮要求：模糊匹配之前必须先做一次精确匹配）---
     record = _CHARACTER_INDEX.get(key)
     if record is not None:
         return record, key
+    # --- 2) 去掉 "_(版本名)" 后缀的基础名精确匹配 ---
     base = _DISAMBIG_SUFFIX_RE.sub("", key).strip()
     record = _CHARACTER_INDEX.get(base)
     if record is not None:
         return record, base
-    if mode != _BARE_NAME_MODE_FUZZY or len(key) < _FUZZY_MIN_LEN:
+    # --- 3) 模糊匹配：带全部约束 ---
+    candidate = _fuzzy_candidate_matches(key, mode)
+    if candidate is None:
         return None, None
-    matches = get_close_matches(key, _CHARACTER_NAMES_LOWER, n=1, cutoff=_FUZZY_CUTOFF)
-    if not matches:
-        return None, None
-    return _CHARACTER_INDEX.get(matches[0]), matches[0]
+    return _CHARACTER_INDEX.get(candidate), candidate
 
 
 def _output_name_for_record(record, fallback=""):
@@ -472,21 +541,21 @@ def _dataset_short_name(tag, record, matched_key=None):
     return _sanitize_name(tag) or None
 
 
-def _resolve_character_name(tag, mode=_BARE_NAME_MODE_OFF, character_list=None):
+def _resolve_character_name(tag, mode=_BARE_NAME_MODE_OFF):
     """把一个「开放写法」的**裸名字** tag 解析成角色名（优先返回短名，不带作品名）。
 
     参数 tag 应当已经剥掉元标签/作品名（元标签场景由 _meta_series_name 先剥壳）；
     这里只做「这个名字是哪个角色」的判定，不做括号解析、不做轮次编排。
 
     这是无作品名识别 / 元标签识别的**共用作答函数**，只负责判定，不做轮次编排，
-    因此 _character_name_from_tag（元标签分支）与 _character_bare_name（第三轮）
+    因此 _character_name_from_tag（元标签分支）与 _character_bare_name（第二轮）
     可以复用同一套判定而不互相递归：
 
-    1. 手动名单（大小写不敏感）—— 用户填什么就用什么；
-    2. 内嵌 Danbooru 数据集（mode 决定是否启用模糊匹配）：命中后按「短名优先」返回
-       （见 _dataset_short_name），这样多角色拼接与 cosplay 场景不会出现
-       "kita_ikuyo_(bocchi_the_rock!)_gotoh_hitori_(bocchi_the_rock!)" 这种超长组合；
-    3. 都没命中且 mode == 数据集模糊匹配 时，_dataset_lookup 内部会再试 difflib。
+    1. 内嵌 Danbooru 数据集精确匹配（大小写 / 下划线空格不敏感）；
+    2. 都没命中且 mode == 数据集模糊匹配 时，再走 difflib 近似匹配
+       （带停用词 / 长度 / 首字母 / cutoff 约束，见 _fuzzy_candidate_matches）；
+    3. 命中后按「短名优先」返回（见 _dataset_short_name），这样多角色拼接与 cosplay
+       场景不会出现 "kita_ikuyo_(bocchi_the_rock!)_gotoh_hitori_(...)" 这种超长组合。
 
     未命中一律返回 None，保证数据集缺失时行为与旧版一致。
     """
@@ -494,29 +563,22 @@ def _resolve_character_name(tag, mode=_BARE_NAME_MODE_OFF, character_list=None):
     if not tag or _is_artist_tag(tag):
         return None
 
-    # 1) 手动名单
-    lookup = _character_list_names(character_list)
-    if lookup:
-        listed = lookup.get(tag.lower())
-        if listed:
-            return _sanitize_name(listed)
-
-    # 2) 数据集：精确 -> 去后缀基础名 ->（模糊模式）difflib
+    # 数据集：精确 -> 去后缀基础名 ->（模糊模式）difflib
     dataset_mode = mode if mode in _BARE_NAME_MODES else _BARE_NAME_MODE_EXACT
     record, matched_key = _dataset_lookup(tag, dataset_mode)
     if record is None:
         return None
 
-    # 3) 短名优先（多角色/cosplay 场景的关键）
+    # 短名优先（多角色/cosplay 场景的关键）
     return _dataset_short_name(tag, record, matched_key)
 
 
-def _character_bare_name(tag, mode, character_list=None):
+def _character_bare_name(tag, mode):
     """无作品名角色识别：判断纯名字 tag（如 "Emilia" / "rem"）是否为已知角色。
 
-    识别顺序：手动名单（若有）-> 数据集完整 tag 精确匹配 -> 去掉 "_(版本名/服装名)"
-    后缀的基础名精确匹配 -> （模糊模式）difflib 近似匹配。命中则返回清洗后的短名，
-    未命中返回 None。数据集为空集合时永不命中，等同于关闭。
+    识别顺序：数据集完整 tag 精确匹配 -> 去掉 "_(版本名/服装名)" 后缀的基础名精确
+    匹配 -> （模糊模式）带上全部约束的近似匹配。命中则返回清洗后的短名，未命中返回
+    None。数据集为空集合时永不命中，等同于关闭。
 
     已经是 "name (series)"（含 danbooru 的 name_(series) 写法）的 tag 交给第一轮处理；
     但 "<name> (cosplay)" 这类**元标签**除外：这里会先剥掉元标签，只拿 <name> 去匹配，
@@ -524,7 +586,7 @@ def _character_bare_name(tag, mode, character_list=None):
     """
     if mode not in _BARE_NAME_MODES or mode == _BARE_NAME_MODE_OFF:
         return None
-    if not _CHARACTER_NAMES_LOWER and not character_list:
+    if not _CHARACTER_NAMES_LOWER:
         return None
 
     tag = _strip_weights(tag)
@@ -534,24 +596,24 @@ def _character_bare_name(tag, mode, character_list=None):
     # 元标签（"kita_ikuyo (cosplay)"）先剥壳，只匹配括号前的裸名字
     meta_name, _meta = _meta_series_name(tag)
     if meta_name:
-        return _resolve_character_name(meta_name, mode, character_list)
+        return _resolve_character_name(meta_name, mode)
 
     # 已经是 "name (series)" 的 tag 不归本函数管（元标签已在上面被剥掉）
     if _series_name_text(tag):
         return None
-    return _resolve_character_name(tag, mode, character_list)
+    return _resolve_character_name(tag, mode)
 
 
-def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF, character_list=None):
+def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF):
     """Character names guessed from "name (series)" tags, artist tags skipped.
 
-    四轮，先命中先用（重复候选只保留第一次，保证顺序稳定）：
+    三轮，先命中先用（重复候选只保留第一次，保证顺序稳定）：
     1. 每个 tag 的原有 "name (series)" 提取。注意 `<name> (cosplay)` 这类元标签
-       由 _character_name_from_tag 的元标签分支处理（返回裸名 + _cosplay 后缀），
-       因此不会把 cosplay 写成作品名；
-    2. 手动名单 character_list（大小写不敏感）——若有；
-    3. bare_mode 打开时：数据集精确/模糊匹配纯名字 tag（第二轮没命中的 tag 才会走到）；
-    4. 原有回退扫描 _SERIES_NAME_RE（处理非逗号分隔的整段文本）。
+       由 _character_name_from_tag 的元标签分支处理，不会把 cosplay 写成作品名；
+    2. bare_mode 打开时：数据集精确 / 模糊匹配纯名字 tag（第一轮没命中的 tag 才走到）；
+    3. 原有回退扫描 _SERIES_NAME_RE（处理非逗号分隔的整段文本）。
+
+    这里收集**所有**候选，不再有 max_tags 截断（第三轮改为自动检测角色数量）。
     """
     seen = set()
 
@@ -563,90 +625,115 @@ def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF, character_list=None):
 
     for text in texts:
         for tag in _iter_tags(text):
-            candidate = _emit(_character_name_from_tag(tag, character_list))
+            candidate = _emit(_character_name_from_tag(tag))
             if candidate:
                 yield candidate
 
-    list_lookup = _character_list_names(character_list)
-    for text in texts:
-        for tag in _iter_tags(text):
-            # 第二轮走 _candidate_from_tag：先原有逻辑，再名单，最后数据集裸名
-            # （bare_mode 为「关闭」时不会启用数据集那一步）
-            candidate = _emit(_candidate_from_tag(tag, bare_mode, list_lookup, character_list))
-            if candidate:
-                yield candidate
+    if bare_mode != _BARE_NAME_MODE_OFF:
+        for text in texts:
+            for tag in _iter_tags(text):
+                candidate = _emit(_character_bare_name(tag, bare_mode))
+                if candidate:
+                    yield candidate
 
     # fallback for texts whose tags are not comma separated
     for text in texts:
         cleaned = ", ".join(t for t in _iter_tags(text) if not _is_artist_tag(_unescape_tag(t)))
         for match in _SERIES_NAME_RE.finditer(cleaned):
-            candidate = _emit(_character_name_from_tag(match.group(0), character_list))
+            candidate = _emit(_character_name_from_tag(match.group(0)))
             if candidate:
                 yield candidate
 
 
-def _char_names(texts, auto_extract, max_tags, bare_mode=_BARE_NAME_MODE_OFF, character_list=None):
-    names = []
+def _dedupe_character_names(names):
+    """角色名去重，并做**父子角色合并**（同一名字同时以 name 与 name (series) 出现）。
+
+    规则（全部大小写不敏感，用 _dataset_key 归一化后比较）：
+    1. 完全相同的名字只保留一条（保留第一次出现的原大小写）；
+    2. **父子合并**：短的那条本身是纯名字（不含括号），长的形如 `短名 (作品名)`
+       （下划线/空格写法都算），且短名就是长名的括号前部分时，丢弃短名、保留长名。
+       例如 ["denia", "denia (wuthering waves)"] -> ["denia (wuthering waves)"]；
+       ["hakurei_reimu", "hakurei_reimu_(touhou)"] -> ["hakurei_reimu_(touhou)"]；
+       注意两条都带括号、只是基础名相同的不同角色（如 "a (series one)" 与
+       "a (series two)"）不会被合并，避免误删真实的多角色。
+
+    返回新列表，顺序沿用首次出现的顺序。
+    """
+    if not names:
+        return []
+
+    # 归一化 -> 原始名字（同键保留更长的写法，长度相同则保留先出现的）
+    chosen = {}
+    for name in names:
+        key = _dataset_key(name)
+        if not key:
+            continue
+        previous = chosen.get(key)
+        if previous is None or len(name) > len(previous):
+            chosen[key] = name
+
+    keys = list(chosen)
+    dropped = set()
+    for short in keys:
+        # 只有「纯名字」（不带括号）才可能被带作品名的版本吸收
+        if _SERIES_NAME_TAG_RE.match(short):
+            continue
+        for long in keys:
+            if long == short or short in dropped:
+                continue
+            if _DISAMBIG_SUFFIX_RE.sub("", long).strip() == short:
+                dropped.add(short)
+                break
+
+    return [chosen[key] for key in keys if key not in dropped]
+
+
+def _char_names(texts, bare_mode=_BARE_NAME_MODE_OFF):
+    """收集提示词里识别到的**全部**角色名（去重、自动检测数量）。
+
+    第三轮：移除 max_tags 与 character_list——
+    - 显式 `char:角色名` 标记优先：只要出现就只采用它们（保持旧行为）；
+    - 否则用 _auto_candidates 收集所有候选（不再按数量截断）；
+    - 再去重（父子角色保留更长的那条，见 _dedupe_character_names）；
+    - 兜底保护：超过 _MAX_AUTO_NAMES 个视为异常提示词，只保留前 N 个并打 warning。
+    """
+    explicit = []
     for text in texts:
         for match in _CHAR_TAG_RE.findall(text):
             name = _sanitize_name(match)
-            if name and name not in names:
-                names.append(name)
-    if not names and auto_extract:
-        for candidate in _auto_candidates(texts, bare_mode, character_list):
-            if candidate not in names:
-                names.append(candidate)
-            if len(names) >= max_tags:
-                break
+            if name and name not in explicit:
+                explicit.append(name)
+    if explicit:
+        return _dedupe_character_names(explicit)[:_MAX_AUTO_NAMES]
+
+    names = _dedupe_character_names(list(_auto_candidates(texts, bare_mode)))
+    if len(names) > _MAX_AUTO_NAMES:
+        _LOGGER.warning(
+            "识别到 %d 个角色，超过上限 %d，只保留前 %d 个（请检查提示词或用 char: 标记）。",
+            len(names), _MAX_AUTO_NAMES, _MAX_AUTO_NAMES)
+        names = names[:_MAX_AUTO_NAMES]
     return names
 
 
-def _split_character_list(character_list):
-    """把节点里的多行名单字符串切成列表（逗号、分号、换行都算分隔符）。"""
-    if isinstance(character_list, str):
-        parts = _TAG_SPLIT_RE.split(character_list)
-    elif isinstance(character_list, (list, tuple, set)):
-        parts = []
-        for item in character_list:
-            parts.extend(_TAG_SPLIT_RE.split(item) if isinstance(item, str) else [])
-    else:
-        return []
-    return [part.strip() for part in parts if part and part.strip()]
+def _group_tag_for_count(name_count):
+    """按角色数量返回外层分组标签（**标签写死在 _MULTI_GROUP_TAGS**）。
 
-
-def _parse_group_tags(group_tags):
-    """解析「分组标签」参数，返回至少 2 项的分组标签列表。
-
-    规则（与 tooltip 一致）：按逗号切分、去掉空白；第 1 项给双人、第 2 项给多人
-    （多写的第 3 项起忽略）；为空或不足 2 项时整体回退到默认值 ["双人", "多人"]。
-    标签本身不做 _sanitize_name，中文原样保留；只在装配路径时用 _clean_path_part
-    去掉非法字符，避免破坏中文。
-    """
-    parts = [part.strip() for part in _TAG_SPLIT_RE.split(group_tags or "") if part.strip()]
-    if len(parts) < 2:
-        return list(_MULTI_GROUP_FALLBACK)
-    return parts
-
-
-def _group_tag_for_count(name_count, group_tags, enable_multi_group):
-    """决定多角色分组的外层标签；不需要分组时返回 None。
-
-    判定：enable_multi_group 关闭 -> None（回退旧的多角色拼接命名）；
-    name_count == 2 -> 分组标签第 1 项（默认「双人」）；
-    name_count >= 3 -> 分组标签第 2 项（默认「多人」）。
+    判定：name_count == 2 -> _MULTI_GROUP_TAGS[0]（Duo）；
+    name_count >= 3 -> _MULTI_GROUP_TAGS[1]（Group）。
     0 个（兜底命名）与 1 个（单角色）角色永远不分组，保持旧行为。
+
+    第三轮起多人分组是**固定行为**（UI 参数 enable_multi_group / group_tags 已移除），
+    所以这里不再有开关分支。返回空字符串表示不分组。
     """
-    if not enable_multi_group:
-        return None
     if name_count == 2:
-        return group_tags[0]
+        return _MULTI_GROUP_TAGS[0]
     if name_count >= 3:
-        return group_tags[1]
-    return None
+        return _MULTI_GROUP_TAGS[1]
+    return ""
 
 
 def _clean_path_part(part):
-    """清洗路径片段：只处理文件名非法字符，**不动中文**（双人 / 多人原样保留）。"""
+    """清洗路径片段：只处理文件名非法字符，中文等非 ASCII 字符原样保留。"""
     cleaned = _BAD_NAME_RE.sub("_", (part or "").strip())
     return re.sub(r"_+", "_", cleaned).strip("_.")
 
@@ -671,19 +758,18 @@ def _join_character_names(names):
     return joined
 
 
-def _build_save_prefix(names, mode, enable_multi_group=True, group_tags=None):
+def _build_save_prefix(names, mode):
     """把识别结果组装成 get_save_image_path 需要的 prefix。
 
     返回 (prefix, display)。display 是写回前端的提示文本。
 
     分支：
-    1. names 为空 -> 兜底名称（单段 prefix，旧行为）；
-    2. 1 个角色 -> 「角色名」/「角色名/角色名」（旧行为，绝不加「单人」前缀）；
-    3. 2 个及以上且开启多人分组 -> 外层 双人/多人：
-       - 文件夹模式 prefix = "双人/名字A_名字B"（每个组合一个子文件夹，内部连续编号）；
-       - 文件名模式 prefix = "双人_名字A_名字B"（文件名里带分组前缀）；
-       名字列表先做确定性排序（见 _sorted_character_names），因此顺序无关；
-    4. 2 个及以上且关闭多人分组 -> 旧的多角色拼接命名（兼容旧工作流）。
+    1. names 为空 -> 兜底名称（返回 None，由调用方处理）；
+    2. 1 个角色 -> 「角色名」/「角色名/角色名」（旧行为，绝不加单人/单人前缀）；
+    3. 2 个及以上 -> 外层分组标签（写死在 _MULTI_GROUP_TAGS：Duo / Group）：
+       - 文件夹模式 prefix = "Duo/名字A_名字B"（每个组合一个子文件夹，内部连续编号）；
+       - 文件名模式 prefix = "Duo_名字A_名字B"（文件名里带分组前缀）；
+       名字列表先做确定性排序（见 _sorted_character_names），因此 tag 顺序无关。
     """
     if not names:
         return None, None
@@ -695,8 +781,7 @@ def _build_save_prefix(names, mode, enable_multi_group=True, group_tags=None):
 
     sorted_names = _sorted_character_names(names)
     joined = _join_character_names(sorted_names)
-    group_tag = _group_tag_for_count(len(names), group_tags or _MULTI_GROUP_FALLBACK,
-                                     enable_multi_group)
+    group_tag = _group_tag_for_count(len(names))
     folder_mode = _MODE_ALIASES.get(mode, mode) == "按角色分组文件夹"
 
     if group_tag:
@@ -705,16 +790,19 @@ def _build_save_prefix(names, mode, enable_multi_group=True, group_tags=None):
             # 文件夹模式：外层分组 + 角色组合子文件夹（前缀只到目录，文件名由编号生成）
             prefix = f"{parent}/{joined}"
             return prefix, f"角色名: {prefix}"
-        # 文件名模式：文件名前缀带分组标签，如 双人_kita_ikuyo_gotoh_hitori
+        # 文件名模式：文件名前缀带分组标签，如 Duo_kita_ikuyo_gotoh_hitori
         prefix = f"{parent}_{joined}"
         return prefix, f"角色名: {prefix}"
 
-    # 关闭多人分组：保留旧的多角色拼接命名（仅排序以保证顺序无关）
+    # 理论上不会走到这里（2 个及以上一定有分组标签），保留旧拼接命名兜底
     prefix = f"{joined}/{joined}" if folder_mode else joined
     return prefix, f"角色名: {joined}"
 
 
-_MODES = ["按角色命名文件", "按角色分组文件夹"]
+# 保存方式选项：第三轮把默认值改为「按角色分组文件夹」，因此它排在第一位
+_MODES = ["按角色分组文件夹", "按角色命名文件"]
+# 默认保存方式：第三轮起改为「按角色分组文件夹」（用户仍可切到按角色命名文件）
+_DEFAULT_MODE = "按角色分组文件夹"
 # legacy English values saved by earlier versions, kept for workflow compatibility
 _MODE_ALIASES = {"filename": "按角色命名文件", "folder": "按角色分组文件夹"}
 
@@ -731,40 +819,22 @@ class CharNameSaveImage:
             "required": {
                 "images": ("IMAGE", {"label": "图像"}),
                 "mode": (_MODES + list(_MODE_ALIASES), {
-                    "default": "按角色命名文件",
+                    "default": _DEFAULT_MODE,
                     "label": "保存方式",
-                    "tooltip": "按角色命名文件: 以「角色名_编号」命名输出文件；按角色分组文件夹: 在输出目录下按角色名建立文件夹，文件在文件夹内按编号保存。",
-                }),
-                "auto_extract": ("BOOLEAN", {
-                    "default": True,
-                    "label": "自动提取角色名",
-                    "tooltip": "提示词中没有 char:角色名 标记时，识别「角色名 (作品名)」结构的 tag（danbooru 惯例）。会自动跳过画师 tag（@画师、by 画师、by (画师:权重)、drawn by 画师、artist: 画师）。",
-                }),
-                "max_tags": ("INT", {
-                    "default": 1, "min": 1, "max": 10,
-                    "label": "角色名数量上限",
-                    "tooltip": "自动提取时最多采用的角色名数量，多个名字用 _ 连接；识别到 2 个及以上时按「多人自动分组」处理。多角色建议用 char: 角色名 显式标记。",
+                    "tooltip": "按角色分组文件夹（默认）: 在输出目录下按角色名建立文件夹，文件在文件夹内按编号保存；"
+                               "按角色命名文件: 以「角色名_编号」命名输出文件。"
+                               "识别到多个角色时会自动加一层分组目录（2 人 Duo、3 人及以上 Group）。",
                 }),
                 "bare_name_mode": (_BARE_NAME_MODES, {
-                    "default": _BARE_NAME_MODE_OFF,
+                    "default": _BARE_NAME_MODE_FUZZY,
                     "label": "无作品名角色识别",
-                    "tooltip": "识别没有作品名后缀的裸名字 tag（如 Emilia、Rem、frieren）。关闭: 只按原有「角色名 (作品名)」规则识别；数据集精确匹配: 名字需与内嵌 Danbooru 角色数据集命中（忽略大小写与下划线/空格差异，输出数据集里的短名，如 emilia）；数据集模糊匹配: 在精确匹配基础上允许 difflib 近似匹配（cutoff 0.85），可容忍拼写/空格差异，但可能误判。数据集位于 data/characters.jsonl，用 download_dataset.py 下载；文件缺失时三种模式都自动回退到原有逻辑。",
-                }),
-                "character_list": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "label": "已知角色名名单",
-                    "tooltip": "可选的手动补充名单（大小写不敏感），用逗号、分号或换行分隔。名单里的纯名字 tag 也会被识别为角色名，作为数据集之外的补充；留空则只依赖数据集与原有规则。",
-                }),
-                "enable_multi_group": ("BOOLEAN", {
-                    "default": True,
-                    "label": "多人自动分组",
-                    "tooltip": "开启后，识别到 2 个角色时归入「双人」文件夹，3 个及以上归入「多人」文件夹；关闭则沿用旧的多角色拼接命名。",
-                }),
-                "group_tags": ("STRING", {
-                    "default": "双人,多人",
-                    "label": "分组标签",
-                    "tooltip": "两个逗号分隔的标签，依次用于双人、多人分组。默认：双人,多人。",
+                    "tooltip": "识别没有作品名后缀的裸名字 tag（如 Emilia、Rem、frieren）。"
+                               "关闭: 只按原有「角色名 (作品名)」规则识别（与最初版本一致）；"
+                               "数据集精确匹配: 名字需与内嵌 Danbooru 角色数据集精确命中（忽略大小写与下划线/空格差异）；"
+                               "数据集模糊匹配（默认）: 在精确匹配之后允许 difflib 近似匹配，"
+                               "但带停用词、最低长度 4、长度差 ≤ 1、首字母相同、cutoff 0.92 等约束，"
+                               "避免 stage→sage 这类短词误判。"
+                               "数据集位于 data/characters.jsonl，用 download_dataset.py 下载；文件缺失时自动回退原有逻辑。",
                 }),
                 "padding": ("INT", {
                     "default": 5, "min": 1, "max": 8,
@@ -794,27 +864,31 @@ class CharNameSaveImage:
     CATEGORY = "image"
     DESCRIPTION = (
         "根据提示词中的角色名 tag（char:xxx 标记，或自动提取）生成文件名/文件夹来保存图像。"
-        "自动提取支持 danbooru 惯例的「角色名 (作品名)」tag；开启「无作品名角色识别」后，"
-        "还会用内嵌的 Danbooru 角色数据集（data/characters.jsonl）检索 Emilia、Rem 这类"
-        "没有作品名的裸名字 tag。开启「多人自动分组」后，识别到 2 个角色会归入「双人」、"
-        "3 个及以上归入「多人」，子文件夹名对角色名做确定性排序，同一提示词顺序变化也落在"
+        "自动提取支持 danbooru 惯例的「角色名 (作品名)」tag；「无作品名角色识别」可用内嵌的"
+        "Danbooru 角色数据集（data/characters.jsonl）检索 Emilia、Rem 这类裸名字 tag。"
+        "角色数量自动检测：2 个角色归入 Duo 目录、3 个及以上归入 Group 目录（可用英文名以"
+        "避免中文路径的兼容性问题），子目录名对角色名做确定性排序，同一提示词顺序变化也落在"
         "同一目录；cosplay 等元标签（(cosplay)、(alternate_costume)…）不会被当成作品名。"
     )
 
-    def save_images(self, images, mode="按角色命名文件", auto_extract=True, max_tags=1,
-                    bare_name_mode=_BARE_NAME_MODE_OFF, character_list="",
-                    enable_multi_group=True, group_tags="双人,多人",
+    def save_images(self, images, mode=_DEFAULT_MODE,
+                    bare_name_mode=_BARE_NAME_MODE_FUZZY,
                     padding=5, fallback_name="ComfyUI", positive_text=None,
-                    prompt=None, extra_pnginfo=None):
+                    prompt=None, extra_pnginfo=None, **legacy):
+        # **legacy 兼容旧工作流里遗留的参数（auto_extract / max_tags / character_list /
+        # enable_multi_group / group_tags）。它们已从节点面板移除：
+        #   auto_extract / enable_multi_group 永久开启；max_tags / character_list 不再生效；
+        #   group_tags 写死为 _MULTI_GROUP_TAGS。这里只是接收后忽略，避免旧工作流报错。
+        if legacy:
+            _LOGGER.debug("忽略已移除的历史参数: %s", sorted(legacy))
         if isinstance(positive_text, str) and positive_text.strip():
             texts = [positive_text]
         else:
             texts = _prompt_texts(prompt)
-        names = _char_names(texts, auto_extract, max_tags, bare_name_mode,
-                            _split_character_list(character_list))
-        # 分组决策：0 个走兜底、1 个保持原样、2 个进「双人」、3 个及以上进「多人」
-        prefix, display = _build_save_prefix(
-            names, mode, enable_multi_group, _parse_group_tags(group_tags))
+        # 自动检测角色数量（不再有 max_tags 上限，超过 _MAX_AUTO_NAMES 会打 warning）
+        names = _char_names(texts, bare_name_mode)
+        # 分组决策：0 个走兜底、1 个保持原样、2 个进 Duo、3 个及以上进 Group
+        prefix, display = _build_save_prefix(names, mode)
         if prefix is None:
             name = (_sanitize_name(fallback_name) or "ComfyUI")[:150]
             prefix = f"{name}/{name}" if _MODE_ALIASES.get(mode, mode) == "按角色分组文件夹" else name
@@ -851,76 +925,120 @@ _load_character_index()
 
 # ============================== 使用示例 =====================================
 #
-# 例 1：双人提示词（无作品名，需要 bare_name_mode 打开数据集检索）
+# 例 1：双人提示词（无作品名，需要「无作品名角色识别」= 数据集精确/模糊匹配）
 #   提示词: masterpiece, kita_ikuyo, gotoh_hitori, bocchi_the_rock!, 1girl, 2girls
-#   参数:   无作品名角色识别 = 数据集精确匹配（角色名数量上限 >= 2）
 #   结果:   names = ["kita_ikuyo", "gotoh_hitori"]
-#           - 文件夹模式: output/双人/kita_ikuyo_gotoh_hitori/kita_ikuyo_gotoh_hitori_00001_.png
-#           - 文件名模式: output/双人_kita_ikuyo_gotoh_hitori_00001_.png
+#           - 文件夹模式（默认）: output/Duo/kita_ikuyo_gotoh_hitori/kita_ikuyo_gotoh_hitori_00001_.png
+#           - 文件名模式:         output/Duo_kita_ikuyo_gotoh_hitori_00001_.png
 #   顺序无关: 写成 gotoh_hitori, kita_ikuyo 得到的路径完全相同（内部按 str.lower() 排序）。
+#   分组目录用英文 Duo / Group，避免中文路径在 zip / git / 挂载盘上的编码兼容性问题。
 #
 # 例 2：cosplay 提示词（元标签不当作品名）
 #   提示词: masterpiece, kita_ikuyo (cosplay), gotoh_hitori (cosplay), alternate_costume
-#   结果:   names = ["gotoh_hitori_cosplay", "kita_ikuyo_cosplay"]（后缀保留 cosplay 语义）
-#           - 文件夹模式: output/双人/gotoh_hitori_cosplay_kita_ikuyo_cosplay/..._00001_.png
+#   结果:   names = ["gotoh_hitori", "kita_ikuyo"]（数据集命中，取规范短名）
+#           - 文件夹模式: output/Duo/gotoh_hitori_kita_ikuyo/..._00001_.png
 #   若数据集里没有该角色，则退化为括号前的裸名 + _cosplay（如 denia_cosplay）；
 #   把 _META_SERIES_SUFFIX 改成 "" 即可去掉后缀（cosplay 图与普通图合并到同一目录）。
 #
 # 例 3：三人及以上
-#   3 个角色 -> output/多人/<排序后的三个名字>/..._00001_.png
+#   3 个角色 -> output/Group/<排序后的三个名字>/..._00001_.png
 #
-# 例 4：兼容旧行为
-#   enable_multi_group=False 时，多角色回到旧的拼接命名（单角色/兜底命名不受影响）；
-#   bare_name_mode="关闭" 且只有 1 个角色时，输出与本插件旧版本逐字节一致。
+# 例 4：模糊匹配的约束（第三轮修复 stage -> sage）
+#   提示词里的 stage / live house / guitar / looking at each other 等通用词不会参与模糊
+#   匹配（_BARE_NAME_STOPWORDS），另外还要求长度 ≥ 4、与候选长度差 ≤ 1、首字母相同、
+#   相似度 ≥ 0.92。因此那条 bocchi 双人提示词不会再产出 gotoh_hitori_kita_ikuyo_sage。
+#
+# 例 5：兼容旧行为
+#   bare_name_mode="关闭" 时只识别 "name (series)"（与最初版本一致）；
+#   单角色不加任何分组前缀；数据集缺失时只做精确匹配与原有逻辑。
 # ============================================================================
 
 def _self_test():
-    """极简自测：验证多角色分组、排序稳定性与 cosplay 元标签判定。
+    """极简自测：模糊匹配约束（stage/sage）、多人分组与 cosplay 元标签。
 
-    只依赖纯函数（不写磁盘、不需要 ComfyUI），直接运行本文件即可：
+    只依赖纯函数（不写磁盘、不需要 ComfyUI），配合已下载的数据集效果最好：
 
-        python __init__.py
-        F:\\ComfyUI\\venv\\Scripts\\python.exe __init__.py
+        F:\\ComfyUI\\venv\\Scripts\\python.exe -c "import sys; sys.path.insert(0, r'F:\\ComfyUI\\custom_nodes\\ComfyUI-CharNameSave'); import __init__ as m; raise SystemExit(m._run_self_test())"
 
-    输出每项的 "期望 -> 实际"，全部通过时打印 OK。
+    每项打印「标签: got=… want=…」，全部通过时返回 0。
     """
-    def names_of(prompt, mode, limit=10):
-        return _char_names([prompt], True, limit, mode)
-
     exact = _BARE_NAME_MODE_EXACT
+    fuzzy = _BARE_NAME_MODE_FUZZY
     checks = []
 
     def check(label, got, want):
         checks.append((label, got, want))
 
-    # --- 问题 1：多角色分组 + 顺序无关 ---
-    two = names_of("kita_ikuyo, gotoh_hitori, bocchi_the_rock!", exact)
+    def names_of(prompt, mode=exact):
+        """识别一条提示词的全部角色名（自动检测数量，无 max_tags）。"""
+        return _char_names([prompt], mode)
+
+    # --- 任务 1：模糊匹配不再把 stage 当成 sage ---
+    check("stage 命中停用表", "stage" in _BARE_NAME_STOPWORDS, True)
+    check("stage lights 命中停用表", "stage lights" in _BARE_NAME_STOPWORDS, True)
+    check("stage 不参与模糊匹配", _fuzzy_candidate_matches("stage", fuzzy), None)
+    check("stage 不会识别成角色", _character_bare_name("stage", fuzzy), None)
+    check("stage lights 不会识别成角色", _character_bare_name("stage lights", fuzzy), None)
+    check("停用表外的相似词仍需约束",
+          _fuzzy_candidate_matches("stge", fuzzy), None)  # 长度差 > 1
+    if _dataset_lookup("sage", exact)[0] is not None:
+        # 数据集里确实有 sage 时，stage 必须被拦下（这就是第三轮的 bug 复现用例）
+        check("数据集里的 sage 不会被 stage 命中",
+              _character_bare_name("stage", fuzzy), None)
+    # 真实的错拼纠正仍然有效（同长度、同首字母、cutoff 0.92 以内）
+    if _dataset_lookup("kita_ikuyo", exact)[0] is not None:
+        check("同长度错拼仍可纠正",
+              _character_bare_name("kita_ikuy", fuzzy), "kita_ikuyo")
+
+    # 用户报告的那条提示词：不能出现 sage
+    bocchi_prompt = (
+        "masterpiece, best quality, highres, 2girls, kita ikuyo, red hair, long hair, "
+        "side ponytail, yellow hair ornament, school uniform, red ribbon, pleated skirt, "
+        "gotoh hitori, pink hair, long hair, blue hair bobbles, yellow hair bobbles, "
+        "pink track jacket, black track pants, guitar, playing guitar together, live house, "
+        "stage, stage lights, singing, smiling, looking at each other, holding hands, "
+        "dynamic angle, detailed background, bocchi the rock!,"
+    )
+    reported = names_of(bocchi_prompt, fuzzy)
+    check("回归：报告中不含 sage", any("sage" in n for n in reported), False)
+    if _dataset_lookup("kita_ikuyo", exact)[0] is not None:
+        check("回归：双人仍被识别", sorted(reported), ["gotoh_hitori", "kita_ikuyo"])
+        check("回归：双人落在 Duo 目录",
+              _build_save_prefix(reported, _DEFAULT_MODE)[0].startswith("Duo/"), True)
+
+    # --- 任务 2：自动检测数量 + 分组（英文目录名）---
+    two = names_of("kita_ikuyo, gotoh_hitori, bocchi_the_rock!")
     check("双人识别（顺序 A）", two, ["kita_ikuyo", "gotoh_hitori"])
-    # 提取顺序跟随 tag 顺序（这是 _char_names 的既有行为），分组只看排序后的结果
     check("双人识别（顺序 B，集合相同）",
-          sorted(names_of("gotoh_hitori, kita_ikuyo, bocchi_the_rock!", exact)), sorted(two))
+          sorted(names_of("gotoh_hitori, kita_ikuyo, bocchi_the_rock!")), sorted(two))
     check("双人识别（含重复去重）",
-          names_of("kita_ikuyo, gotoh_hitori, kita_ikuyo, bocchi_the_rock!", exact), two)
+          names_of("kita_ikuyo, gotoh_hitori, kita_ikuyo, bocchi_the_rock!"), two)
+    check("文件夹模式前缀", _build_save_prefix(two, _DEFAULT_MODE)[0],
+          "Duo/gotoh_hitori_kita_ikuyo")
+    check("文件夹模式顺序无关",
+          _build_save_prefix(_sorted_character_names(two[::-1]), _DEFAULT_MODE)[0],
+          "Duo/gotoh_hitori_kita_ikuyo")
+    check("文件名模式前缀", _build_save_prefix(two, "按角色命名文件")[0],
+          "Duo_gotoh_hitori_kita_ikuyo")
 
-    folder = "按角色分组文件夹"
-    prefix_a = _build_save_prefix(two, folder, True, _parse_group_tags("双人,多人"))[0]
-    check("文件夹模式前缀", prefix_a, "双人/gotoh_hitori_kita_ikuyo")
-    prefix_b = _build_save_prefix(_sorted_character_names(two[::-1]), folder, True,
-                                  _parse_group_tags("双人,多人"))[0]
-    check("文件夹模式前缀（顺序无关）", prefix_b, prefix_a)
-    check("文件名模式前缀", _build_save_prefix(two, "按角色命名文件", True, None)[0],
-          "双人_gotoh_hitori_kita_ikuyo")
+    three = names_of("kita_ikuyo, gotoh_hitori, ijichi_nijika, bocchi_the_rock!")
+    check("多人识别数量", len(three), 3)
+    check("多人文件夹前缀", _build_save_prefix(three, _DEFAULT_MODE)[0].split("/")[0], "Group")
+    check("分组标签写死为英文", _MULTI_GROUP_TAGS, ("Duo", "Group"))
 
-    # 3 个角色 -> 多人
-    three = names_of("kita_ikuyo, gotoh_hitori, ijichi_nijika, bocchi_the_rock!", exact)
-    check("多人识别", len(three), 3)
-    check("多人文件夹前缀", _build_save_prefix(three, folder, True, None)[0].split("/")[0], "多人")
+    # 父子角色去重：name 与 name (series) 同时出现时保留更长的那条
+    check("父子去重（保留带作品名的那条）",
+          _dedupe_character_names(["denia", "denia (wuthering waves)"]),
+          ["denia (wuthering waves)"])
+    check("父子去重（大小写不敏感）",
+          _dedupe_character_names(["Hakurei_Reimu", "hakurei_reimu_(touhou)"]),
+          ["hakurei_reimu_(touhou)"])
+    check("父子去重（相同名字只留一条）",
+          _dedupe_character_names(["rem", "REM", "rem"]), ["rem"])
+    check("超量角色只保留前 8 个",
+          len(_char_names([", ".join(f"char:c{i}" for i in range(12))], exact)), _MAX_AUTO_NAMES)
 
-    # 关闭多人分组 -> 旧拼接命名
-    check("关闭分组回退", _build_save_prefix(two, folder, False, None)[0],
-          "gotoh_hitori_kita_ikuyo/gotoh_hitori_kita_ikuyo")
-
-    # --- 问题 2：cosplay 元标签 ---
+    # --- cosplay 元标签 ---
     check("cosplay 不当作品名", _character_name_from_tag("gotoh_hitori (cosplay)"),
           "gotoh_hitori")
     check("cosplay 下划线写法", _character_name_from_tag("gotoh_hitori_(cosplay)"),
@@ -934,15 +1052,16 @@ def _self_test():
     check("普通作品名不受影响", _character_name_from_tag("denia (wuthering waves)"),
           "denia_(wuthering_waves)")
     check("画师 tag 仍被过滤", _character_name_from_tag("by (ningen mame:0.5)"), None)
-    check("cosplay 提示词整体", names_of("gotoh_hitori (cosplay), cosplay, alternate_costume",
-                                      exact), ["gotoh_hitori"])
+    check("cosplay 提示词整体",
+          names_of("gotoh_hitori (cosplay), cosplay, alternate_costume", exact),
+          ["gotoh_hitori"])
 
-    # --- 兼容性：关闭数据集 + 单角色时与旧版一致 ---
-    check("旧逻辑（关闭 + 单角色）",
-          names_of("denia (wuthering waves)", _BARE_NAME_MODE_OFF), ["denia_(wuthering_waves)"])
-    check("分组标签回退默认", _parse_group_tags(""), list(_MULTI_GROUP_FALLBACK))
-    check("分组标签自定义", _parse_group_tags(" Couple , Group "), ["Couple", "Group"])
-    check("中文标签不被清洗", _clean_path_part("双人"), "双人")
+    # --- 兼容性：关闭数据集识别时只认 "name (series)" ---
+    check("关闭模式：只认 name (series)",
+          names_of("denia (wuthering waves)"), ["denia_(wuthering_waves)"])
+    check("关闭模式：裸名字不猜",
+          names_of("kita_ikuyo, gotoh_hitori, bocchi_the_rock!", _BARE_NAME_MODE_OFF), [])
+    check("路径片段清洗不动中文", _clean_path_part("双人"), "双人")
 
     failed = 0
     for label, got, want in checks:
@@ -954,15 +1073,15 @@ def _self_test():
 
 
 def _run_self_test():
-    """调用 _self_test() 并打印结果（本地自测用）。
+    """调用 _self_test() 并打印结果（本地自测用），返回失败项数量。
 
-    注意：本项目是 ComfyUI 自定义节点包，模块名必须是 `__init__`，所以这里**不能**
-    用 `if __name__ == "__main__"` 做入口（那样会在单元测试 / ComfyUI 里被误触发）。
-    请用下面任意一种方式运行：
+    注意：本项目是 ComfyUI 自定义节点包，模块名必须是 `__init__`，所以这里不用
+    `if __name__ == "__main__"` 做入口（那样会在 ComfyUI / 单元测试里被误触发）。
+    运行方式：
 
-        python -c "import sys; sys.path.insert(0, r'F:\\ComfyUI\\custom_nodes\\ComfyUI-CharNameSave'); import __init__ as m; m._run_self_test()"
+        F:\\ComfyUI\\venv\\Scripts\\python.exe -c "import sys; sys.path.insert(0, r'F:\\ComfyUI\\custom_nodes\\ComfyUI-CharNameSave'); import __init__ as m; raise SystemExit(m._run_self_test())"
 
-    或者直接跑正式测试（推荐，已包含同样断言）：
+    或者直接跑正式测试（推荐，断言更全）：
 
         F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_extract.py
         F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_bare_name.py

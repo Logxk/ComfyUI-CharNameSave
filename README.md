@@ -24,13 +24,13 @@
 
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [节点参数（仅 6 项）](#节点参数仅-6-项)
 - [角色名的来源](#角色名的来源)
 - [无作品名角色识别（数据集）](#无作品名角色识别数据集)
 - [多人自动分组](#多人自动分组)
 - [cosplay 等元标签](#cosplay-等元标签)
 - [命名规则](#命名规则)
 - [两种保存模式](#两种保存模式)
-- [参数](#参数)
 - [输入与输出](#输入与输出)
 - [常见问题与排错](#常见问题与排错)
 - [已知限制](#已知限制)
@@ -52,9 +52,32 @@
    masterpiece, best quality, 1girl, solo, char:hakurei_reimu, red dress
    ```
 
-3. 执行后节点下方会显示本次识别结果，输出文件形如 `output/hakurei_reimu_00001_.png`。
+3. 执行后节点下方会显示本次识别结果，输出文件形如 `output/hakurei_reimu/hakurei_reimu_00001_.png`（默认「按角色分组文件夹」）。
 
 提示词由通配符 / 中间件 / 多场景切换动态生成时，请把**最终合成的文本**接到节点的「正向提示词」输入口（见下一节）。
+
+## 节点参数（仅 6 项）
+
+节点面板只保留下面 6 个控件，其余全部移除或固定（第三轮精简）：
+
+| 界面参数 | 内部名 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `图像` | `images` | IMAGE | — | 要保存的图像批次 |
+| `保存方式` | `mode` | 下拉 | **按角色分组文件夹** | `按角色分组文件夹` / `按角色命名文件` |
+| `无作品名角色识别` | `bare_name_mode` | 下拉 | **数据集模糊匹配** | `关闭` / `数据集精确匹配` / `数据集模糊匹配` |
+| `编号位数` | `padding` | 整数 1–8 | `5` | 编号补零位数，5 → `00001` |
+| `兜底名称` | `fallback_name` | 字符串 | `ComfyUI` | 识别不到角色名时的名称前缀 |
+| `正向提示词` | `positive_text` | 字符串（输入口） | 空 | 可选，只能连线；连接后只用它提取角色名 |
+
+已**固定**（不再出现在面板上）：
+
+- **自动提取角色名**：永久开启（没有 `char:` 标记时按 `角色名 (作品名)` / 数据集检索自动识别）；
+- **角色数量**：自动检测，不再有「角色名数量上限」（超过 8 个视为异常，只取前 8 个并在日志打 warning）；
+- **多人自动分组**：永久开启（2 人 → `Duo`，3 人及以上 → `Group`）。
+
+已**移除**：`已知角色名名单`（手动名单）。请用 `char:角色名` 标记代替。
+
+> 旧工作流里遗留的这些控件值会被安全忽略，不会报错。
 
 ## 角色名的来源
 
@@ -67,12 +90,14 @@
    masterpiece, best quality, 1girl, solo, char:hakurei_reimu, red dress
    ```
 
-   可以写多个 `char:`，全部采用（不受「角色名数量上限」限制），用 `_` 连接。
-3. **自动提取**（需 `自动提取角色名` 开启，且上面两种都没命中才执行）：
+   可以写多个 `char:`，全部采用（自动检测数量），用 `_` 连接。
+3. **自动提取**（永久开启，且上面两种都没命中才执行）：
    - 先剔除画师 tag，避免画师名被当成角色。被识别为画师的写法：`@画师`（Anima 惯例，如 `@hiten (hitenkei):0.6`）、`by 画师` / `by (画师:权重)`（如 `by (ningen mame:0.5)`）、`by_画师`、`drawn by 画师`、`artist: 画师`；
    - 再按 danbooru 惯例找 `角色名 (作品名)` 结构，如 `denia (wuthering waves)`、`professor niyaniya (blue archive)`；danbooru 的下划线写法同样支持：`hakurei_reimu_(touhou)`；
    - 权重写法会被还原：`角色名 (作品名):1.2` 与 `(角色名 (作品名):1.2)` 都算 `角色名 (作品名)`；括号里只有数字时按权重处理，不算作品名（`1girl (0.8)` 不会产出名字）；
-   - 最多取「角色名数量上限」个，多个名字用 `_` 连接；
+   - 全部候选都会被收集（不再有数量上限），多个名字用 `_` 连接；
+   - **父子角色去重**：同一名字同时以 `name` 与 `name (series)` 出现时，只保留更长的那条（`denia` + `denia (wuthering waves)` → 只留后者），判定大小写不敏感；
+   - 超过 8 个角色时视为异常提示词，只取前 8 个并在日志里打 warning；
    - 转义括号（`\(` `\)`）会先还原再判断。
 4. **兜底**：以上都没识别到时使用「兜底名称」（默认 `ComfyUI`，即核心默认命名格式 `ComfyUI_00001_.png`）。提示词里只有裸 tag（没有 `作品名` 括号结构）时不会乱猜，直接走兜底 —— 这类提示词请用 `char:角色名`，或开启下面的「无作品名角色识别」。
 
@@ -104,28 +129,32 @@ F:\ComfyUI\venv\Scripts\python.exe download_dataset.py --from-file characters.js
 
 | 模式 | 行为 | 例子（提示词里写 `emilia`） |
 | --- | --- | --- |
-| `关闭`（默认） | 只用原有规则，裸名字一律不猜 | 走兜底 `ComfyUI_00001_.png` |
-| `数据集精确匹配`（推荐） | 名字必须命中数据集：忽略大小写、忽略下划线/空格差异，并自动补上数据集里的作品名 | `emilia_(re_zero)_00001_.png` |
-| `数据集模糊匹配` | 在精确匹配基础上，再用 `difflib` 近似匹配（`cutoff=0.85`），能容忍拼写/空格差异，但**可能误判** | `emilie` 之类也可能命中 `emilia_(re_zero)` |
+| `关闭` | 只用原有规则，裸名字一律不猜（与最初版本一致） | 走兜底 `ComfyUI_00001_.png` |
+| `数据集精确匹配` | 名字必须精确命中数据集：忽略大小写、忽略下划线/空格差异 | `emilia_00001_.png` |
+| `数据集模糊匹配`（默认） | 精确匹配没命中时，再用 `difflib` 近似匹配，但带严格约束（见下） | `kita ikuy` → `kita_ikuyo` |
 
 匹配细节：
 
-- 先按数据集里的完整 tag 精确匹配（`hakurei_reimu_(touhou)`），再按去掉 `_(版本/服装名)` 后缀的基础名匹配（`hakurei reimu` → `hakurei_reimu_(touhou)`）；
+- 先按数据集里的完整 tag 精确匹配（`hakurei_reimu_(touhou)`），再按去掉 `_(版本/服装名)` 后缀的基础名匹配（`hakurei reimu` → `hakurei_reimu`）；
 - 同名多角色时取 `post_count` 最高的那条（如 `rem` → `rem_(re:zero)` 而非 `rem_(death_note)`）；
 - 已经是 `角色名 (作品名)` 的 tag 仍走原有逻辑，优先级更高；画师 tag、`1girl`/`solo` 之类的通用 tag 不会被匹配；
-- 太短的名字（< 3 字符）不参与模糊匹配，避免误判；
 - 数据集缺失或为空时，三种模式都不会命中，自动回退到原有逻辑。
 
-### 手动名单 `已知角色名名单`
+#### 模糊匹配的约束（避免把 `stage` 当成角色 `sage`）
 
-数据集覆盖不到的原创角色（OC）或自造名字，可以在「已知角色名名单」里手填，用逗号、分号或换行分隔：
+模糊匹配本质是猜，早期只限制「长度 ≥ 3 + 相似度 ≥ 0.85」，结果提示词里的 `stage` 被匹配成了角色 `sage`
+（相似度 8/9 ≈ 0.888），文件名里多出一段 `sage`。现在必须**全部满足**下列条件才允许模糊命中：
 
-```
-myoc, 原创角色A
-another_char
-```
+| 约束 | 取值 | 作用 |
+| --- | --- | --- |
+| 精确匹配优先 | — | 先做一次大小写/下划线不敏感的精确匹配，命中就不再模糊 |
+| 停用词 | `_BARE_NAME_STOPWORDS` | `stage`、`stage lights`、`live house`、`guitar`、`singing`、`looking at each other`、`holding hands`、`school uniform`… 直接跳过模糊匹配 |
+| 最低长度 | ≥ 4 字符 | 排除 `sage`、`2girls` 这类短词被反向命中 |
+| 长度接近 | 与候选长度差 ≤ 1 | 排除 `kit` → `kita ikuyo` 这类长度悬殊的匹配 |
+| 首字母相同 | `tag[0] == cand[0]` | 错拼通常首字母不变 |
+| 相似度阈值 | `cutoff = 0.92`（原 0.85） | `stage`/`sage`（0.888）不再达标 |
 
-名单匹配**大小写不敏感**，且在数据集匹配之前生效（作为补充，不影响 `char:` 标记与原逻辑）。
+真实的同长度错拼仍然可以纠正（例如 `kita ikuy` → `kita_ikuyo`）。停用词表可在 `__init__.py` 里自行扩充。
 
 ### 裸名字输出「短名」
 
@@ -143,25 +172,25 @@ another_char
 
 ## 多人自动分组
 
-一条提示词里出现多个角色时（`max_tags` ≥ 2 且确实识别到多个名字），会自动按人数分组，避免出现
+一条提示词里出现多个角色时（识别到 2 个及以上），会自动按人数分组，避免出现
 `gotoh_hitori_(cosplay)_kita_ikuyo_(bocchi_the_rock!)_00001_.png` 这类超长文件名，也避免 tag 顺序变化导致目录碎片化。
 
 | 识别到的角色数 | 分组 | 文件夹模式输出 | 文件名模式输出 |
 | --- | --- | --- | --- |
-| 0 | 不分组（兜底名称） | `output/ComfyUI_00001_.png` | 同左 |
+| 0 | 不分组（兜底名称） | `output/ComfyUI/ComfyUI_00001_.png` | `output/ComfyUI_00001_.png` |
 | 1 | 不分组（保持旧行为） | `output/hakurei_reimu/hakurei_reimu_00001_.png` | `output/hakurei_reimu_00001_.png` |
-| 2 | `双人` | `output/双人/kita_ikuyo_gotoh_hitori/kita_ikuyo_gotoh_hitori_00001_.png` | `output/双人_kita_ikuyo_gotoh_hitori_00001_.png` |
-| ≥ 3 | `多人` | `output/多人/<排序后的名字>/<排序后的名字>_00001_.png` | `output/多人_<排序后的名字>_00001_.png` |
+| 2 | `Duo` | `output/Duo/kita_ikuyo_gotoh_hitori/kita_ikuyo_gotoh_hitori_00001_.png` | `output/Duo_kita_ikuyo_gotoh_hitori_00001_.png` |
+| ≥ 3 | `Group` | `output/Group/<排序后的名字>/<排序后的名字>_00001_.png` | `output/Group_<排序后的名字>_00001_.png` |
 
 要点：
 
 - **顺序无关**：子目录/文件名里的角色名会先做确定性排序（`sorted(names, key=str.lower)`），所以
   `kita_ikuyo, gotoh_hitori` 与 `gotoh_hitori, kita_ikuyo` 落在**完全相同**的路径里，不会产生新组合目录；
   写入的仍是名字的原始大小写。
-- **自动去重**：同一条提示词里重复出现的角色只算一次（`kita_ikuyo, gotoh_hitori, kita_ikuyo` → 双人）。
-- **可关闭**：「多人自动分组」关掉后回到旧的多角色拼接命名（`gotoh_hitori_kita_ikuyo/...`），保证旧工作流升级后行为可预测。
-- **可改标签**：「分组标签」默认 `双人,多人`（两个逗号分隔的标签，依次用于双人、多人）；中文标签不会被清洗，只过滤文件名非法字符。
-- 单个角色**不会**加「单人」前缀，输出与旧版本完全一致。
+- **自动去重**：同一条提示词里重复出现的角色只算一次（`kita_ikuyo, gotoh_hitori, kita_ikuyo` → 2 人 → `Duo`）。
+- **分组是固定行为**：第三轮起没有开关（UI 参数 `enable_multi_group` / `group_tags` 已移除），
+  标签**写死**在 `__init__.py` 的 `_MULTI_GROUP_TAGS = ("Duo", "Group")`，用英文目录名以规避中文路径的编码兼容性问题。
+- 单个角色**不会**加任何分组前缀，输出与旧版本一致。
 
 ## cosplay 等元标签
 
@@ -170,10 +199,10 @@ another_char
 | 提示词 | 识别结果 | 输出（文件夹模式） |
 | --- | --- | --- |
 | `gotoh_hitori (cosplay)` | `gotoh_hitori`（数据集命中，取规范短名） | `output/gotoh_hitori/gotoh_hitori_00001_.png` |
-| `kita_ikuyo (cosplay), gotoh_hitori (cosplay), cosplay` | `kita_ikuyo` + `gotoh_hitori` | `output/双人/gotoh_hitori_kita_ikuyo/...` |
-| `someone_unknown (cosplay)`（数据集/名单都没有） | `someone_unknown_cosplay` | 裸名 + 固定后缀，稳定可预测 |
+| `kita_ikuyo (cosplay), gotoh_hitori (cosplay), cosplay` | `kita_ikuyo` + `gotoh_hitori` | `output/Duo/gotoh_hitori_kita_ikuyo/...` |
+| `someone_unknown (cosplay)`（数据集里没有） | `someone_unknown_cosplay` | 裸名 + 固定后缀，稳定可预测 |
 
-- 命中数据集或「已知角色名名单」时，直接采用规范名字，不加后缀；
+- 命中数据集时直接采用规范短名，不加后缀；
 - 完全查不到时才用 `裸名 + _cosplay` 兜底（不含括号，`(cosplay)` 绝不会出现在路径里）；
 - 想改成「cosplay 图与普通图放同一个目录」，把 `__init__.py` 里的 `_META_SERIES_SUFFIX` 改为 `""` 即可；
 - 想扩充/缩减元标签表，改 `_META_SERIES`（`cosplay`、`alternate costume`、`alternate-costume` 等写法都能识别）。
@@ -182,7 +211,7 @@ another_char
 
 - 文件名格式：`名称_编号_.png`，编号按「编号位数」补零，例如 `denia_(wuthering_waves)_00001_.png`。
 - 名称清洗：`\ / : * ? " < > |` 与控制字符替换为 `_`，空白替换为 `_`，连续 `_` 合并成一个，去掉首尾的 `_` 和 `.`。所以 `denia (wuthering waves)` → `denia_(wuthering_waves)`，`by (ningen mame:0.5)` → `by_(ningen_mame_0.5)`。
-- 长度上限：单个角色名清洗后截断到 60 字符，拼接后的整体名称截断到 150 字符。
+- 长度上限：单个角色名清洗后截断到 60 字符，拼接后的整体名称截断到 150 字符（`_MULTI_NAME_MAX_LEN`）。
 - 编号 = 输出目录中**同名前缀**已有文件的最大编号 + 1，与内置 Save Image 一致。因此删除已保存的文件后编号会按剩余文件重新计算，**可能再次使用被删掉的编号**。
 - 不支持 `%date%` / `%width%` 之类的变量，文件名与文件夹名完全由角色名决定。
 
@@ -190,23 +219,8 @@ another_char
 
 | 保存方式 | 效果 |
 | --- | --- |
-| `按角色命名文件`（默认） | 同一角色名共用一条编号序列：`output/hakurei_reimu_00001_.png`、`output/hakurei_reimu_00002_.png`… |
-| `按角色分组文件夹` | 在输出目录下按角色名建文件夹，文件夹内单独编号：`output/hakurei_reimu/hakurei_reimu_00001_.png`… |
-
-## 参数
-
-| 界面参数 | 内部名 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- | --- |
-| `保存方式` | `mode` | 下拉 | `按角色命名文件` | `按角色命名文件` / `按角色分组文件夹`；旧版本保存的英文值 `filename` / `folder` 仍被接受并自动映射，下拉里保留仅为兼容旧工作流 |
-| `自动提取角色名` | `auto_extract` | 布尔 | 开启 | 无 `char:` 标记时是否按 `角色名 (作品名)` 结构自动提取；自动提取会自动跳过画师 tag |
-| `角色名数量上限` | `max_tags` | 整数 1–10 | 1 | **仅对自动提取生效**，多个名字用 `_` 连接；显式 `char:` 标记不受此限制 |
-| `无作品名角色识别` | `bare_name_mode` | 下拉 | `关闭` | `关闭` / `数据集精确匹配` / `数据集模糊匹配`，用内嵌 Danbooru 角色数据集识别没有作品名的裸名字 tag（如 `Emilia`）；详见[上文](#无作品名角色识别数据集) |
-| `已知角色名名单` | `character_list` | 多行字符串 | 空 | 可选的手动补充名单（逗号 / 分号 / 换行分隔，大小写不敏感），先于数据集匹配生效，适合 OC 或数据集里没有的名字 |
-| `多人自动分组` | `enable_multi_group` | 布尔 | 开启 | 识别到 2 个角色归入「双人」、3 个及以上归入「多人」（子目录对角色名做确定性排序，顺序无关）；关闭则沿用旧的多角色拼接命名；详见[多人自动分组](#多人自动分组) |
-| `分组标签` | `group_tags` | 字符串 | `双人,多人` | 两个逗号分隔的标签，依次用于双人、多人分组；不足 2 项时回退默认值 |
-| `编号位数` | `padding` | 整数 1–8 | 5 | 编号补零位数，5 → `00001` |
-| `兜底名称` | `fallback_name` | 字符串 | `ComfyUI` | 识别不到角色名时使用的名称前缀，默认即核心格式 `ComfyUI_00001_.png` |
-| `正向提示词` | `positive_text` | 字符串（输入口） | 空 | 可选输入口（无组件，只能连线）；连接后只用它提取角色名 |
+| `按角色分组文件夹`（默认） | 在输出目录下按角色名建文件夹，文件夹内单独编号：`output/hakurei_reimu/hakurei_reimu_00001_.png`… |
+| `按角色命名文件` | 同一角色名共用一条编号序列：`output/hakurei_reimu_00001_.png`、`output/hakurei_reimu_00002_.png`… |
 
 ## 输入与输出
 
@@ -214,28 +228,28 @@ another_char
 - 可选输入 `正向提示词`（`positive_text`，STRING）：最终合成的提示词文本。
 - 隐藏输入 `prompt` / `extra_pnginfo`：ComfyUI 自动注入，用于把工作流写进 PNG 元数据。
 - 输出 `images`（IMAGE）：原样透传，可继续串联其它节点。
-- 前端反馈：执行后节点下方显示本次结果 —— `角色名: denia_(wuthering_waves)`（识别成功，此名称即文件前缀；多角色时显示 `角色名: 双人/gotoh_hitori_kita_ikuyo` 这样的完整前缀）或 `未识别到角色名，使用默认命名: ComfyUI`（走了兜底）；图片照常出现在节点预览区与队列历史中。
+- 前端反馈：执行后节点下方显示本次结果 —— `角色名: denia_(wuthering_waves)`（识别成功，此名称即文件前缀；多角色时显示 `角色名: Duo/gotoh_hitori_kita_ikuyo` 这样的完整前缀）或 `未识别到角色名，使用默认命名: ComfyUI`（走了兜底）；图片照常出现在节点预览区与队列历史中。
 
 ## 常见问题与排错
 
 **文件名一直是 `ComfyUI_00001_.png`，没识别到角色名。**
 
-- 提示词里只有裸 tag（如 `1girl, solo, long hair`）——自动提取只认 danbooru 的 `角色名 (作品名)` 结构，请改用 `char:角色名`，或把「无作品名角色识别」设为 `数据集精确匹配`；
-- 开了「无作品名角色识别」但仍不命中——确认 `data/characters.jsonl` 已下载（跑一次 `download_dataset.py`），以及该角色确实在数据集里（数据集只有 Danbooru 上热度较高的角色）；
+- 提示词里只有裸 tag（如 `1girl, solo, long hair`）——自动提取只认 danbooru 的 `角色名 (作品名)` 结构，请改用 `char:角色名`，或确认「无作品名角色识别」不是 `关闭`（默认已是 `数据集模糊匹配`）；
+- 开了数据集识别但仍不命中——确认 `data/characters.jsonl` 已下载（跑一次 `download_dataset.py`），以及该角色确实在数据集里（数据集只有 Danbooru 上热度较高的角色）；
 - 文本由通配符 / 中间件动态生成，静态扫描拿不到 —— 把最终文本接到「正向提示词」输入口。
-- `自动提取角色名` 被关掉了，或 `char:` 标记拼写有误（必须是 `char:` 开头，`<char:xxx>` 也支持）。
+- `char:` 标记拼写有误（必须是 `char:` 开头，`<char:xxx>` 也支持）。
 
-**开了模糊匹配后名字识别错了。**
+**文件名里多出了 `sage`（或其它没写过的词）。**
 
-模糊匹配（`cutoff=0.85`）本质是猜，相近的短名字容易互相误判（如 `asuka`、`rei` 这类同名角色多的名字）。对命名准确度要求高时请用 `数据集精确匹配`，或直接写 `char:角色名`。
+这是模糊匹配误判，第三轮已修：`stage` 与 `sage` 相似度 0.888，旧的 `cutoff=0.85` 会命中。现在加了停用词、最低长度 4、长度差 ≤ 1、首字母相同、`cutoff=0.92` 五重约束（见[模糊匹配的约束](#模糊匹配的约束避免把-stage-当成角色-sage)）。仍想更保守就把「无作品名角色识别」设为 `数据集精确匹配`，或直接写 `char:角色名`。
 
-**双人图为什么进了「双人」文件夹 / 我还在用旧的多角色拼接命名。**
+**双人图为什么进了 `Duo` 文件夹 / 我不想分组。**
 
-这是「多人自动分组」（默认开启）的效果：2 个角色 → `双人`，3 个及以上 → `多人`，子目录名对角色名排序，所以 tag 顺序变化不会新建文件夹。若要保持旧的多角色拼接命名，把「多人自动分组」关掉即可；想换标签名就改「分组标签」（默认 `双人,多人`）。
+这是固定行为（第三轮起没有开关）：2 个角色 → `Duo`，3 个及以上 → `Group`，子目录名对角色名排序，所以 tag 顺序变化不会新建文件夹。分组目录用英文名以规避中文路径的编码兼容性问题；要改标签就编辑 `__init__.py` 里的 `_MULTI_GROUP_TAGS`。
 
 **文件名里出现了 `(cosplay)` / `cosplay` 后缀。**
 
-`(cosplay)`、`(alternate_costume)` 等属于元标签，不会再被当成作品名写进 `( )` 里。数据集或「已知角色名名单」能查到该角色时只输出角色名；查不到时才用 `裸名_cosplay` 兜底。都不想要的话，把 `__init__.py` 里的 `_META_SERIES_SUFFIX` 改成 `""`。
+`(cosplay)`、`(alternate_costume)` 等属于元标签，不会再被当成作品名写进 `( )` 里。数据集能查到该角色时只输出角色名；查不到时才用 `裸名_cosplay` 兜底。都不想要的话，把 `__init__.py` 里的 `_META_SERIES_SUFFIX` 改成 `""`。
 
 **文件名里跑进了画师名。**
 
@@ -268,15 +282,16 @@ another_char
 
 ## 已知限制
 
-1. 自动提取只认 danbooru 的 `角色名 (作品名)` 结构，裸 tag 一律不猜（宁可走兜底）；要识别裸名字需开启「无作品名角色识别」并准备好数据集。
+1. 自动提取只认 danbooru 的 `角色名 (作品名)` 结构，裸 tag 一律不猜（宁可走兜底）；要识别裸名字需打开「无作品名角色识别」并准备好数据集。
 2. 「无作品名角色识别」只能回答「这个名字是否是数据集里某个已知角色」，**同名多角色时取热度最高的那个**（`rem` → `rem_(re:zero)`），无法从提示词判断你指的是哪一个；需要精确指定时请写 `角色名 (作品名)` 或 `char:角色名`。
-3. 模糊匹配是启发式的，可能误判，且只对长度 ≥ 3 的名字生效。
-4. 数据集只覆盖 Danbooru 上热度较高的角色（约 2.2 万条），原创角色 / 冷门角色需要自己填「已知角色名名单」或用 `char:` 标记。
+3. 模糊匹配是启发式的：即使有停用词 / 长度 / 首字母 / `cutoff=0.92` 等约束，仍可能把生僻词猜成角色名；对准确度要求高时用 `数据集精确匹配`。约束常量都在 `__init__.py` 顶部（`_BARE_NAME_STOPWORDS`、`_BARE_NAME_MIN_LEN`、`_FUZZY_MAX_LEN_DIFF`、`_FUZZY_CUTOFF`）。
+4. 数据集只覆盖 Danbooru 上热度较高的角色（约 2.2 万条），原创角色 / 冷门角色只能靠 `char:` 标记（第三轮已移除手动名单）。
 5. 数据集命中的角色名会归一成**裸名**（如 `emilia_(re:zero)` → `emilia`），因此同名不同作品的冷门角色可能落到同一目录；需要区分时请写 `char:角色名 (作品名)` 显式指定。
 6. 元标签表是固定清单（cosplay 系列）；其他「其实不是作品名」的括号后缀需要自行加进 `_META_SERIES`。
-7. 不带 `@` / `by` 前缀、且名称含括号的画师 tag 与角色 tag 无法区分，请给画师加前缀。
-8. 不支持自定义文件名前缀、子目录或日期变量（不要用本节点做通用命名模板）。
-9. 连接「正向提示词」输入口是最稳的用法；依赖静态扫描时，负向提示词也可能贡献候选名。
+7. 分组目录固定为英文 `Duo` / `Group`，不可通过 UI 修改（改 `_MULTI_GROUP_TAGS` 可自定义）。
+8. 不带 `@` / `by` 前缀、且名称含括号的画师 tag 与角色 tag 无法区分，请给画师加前缀。
+9. 不支持自定义文件名前缀、子目录或日期变量（不要用本节点做通用命名模板）。
+10. 连接「正向提示词」输入口是最稳的用法；依赖静态扫描时，负向提示词也可能贡献候选名。
 
 ## 测试
 
@@ -284,8 +299,8 @@ another_char
 
 ```bash
 python tests/test_extract.py      # 原有逻辑：角色名 (作品名) / 画师过滤 / 命名
-python tests/test_bare_name.py    # 数据集裸名字识别
-python tests/test_multi_group.py  # 多人自动分组 + cosplay 元标签
+python tests/test_bare_name.py    # 数据集裸名字识别 + 模糊匹配约束
+python tests/test_multi_group.py  # 多人分组 / cosplay 元标签 / 面板精简
 ```
 
 Windows 下若系统 Python 缺少依赖，可用 ComfyUI 自带的解释器：
@@ -304,11 +319,12 @@ F:\ComfyUI\venv\Scripts\python.exe tests\test_multi_group.py
 F:\ComfyUI\venv\Scripts\python.exe -c "import sys; sys.path.insert(0, r'F:\ComfyUI\custom_nodes\ComfyUI-CharNameSave'); import __init__ as m; raise SystemExit(m._run_self_test())"
 ```
 
-覆盖内容包括：`by (画师:权重)` 等各种画师串被过滤、`角色名 (作品名)` 自动提取、转义括号与权重写法、`char:` 优先级、兜底命名、端到端产出的文件名；数据集精确/模糊匹配、短名归一、同名取热度最高、数据集缺失时的回退、手动名单；多角色分组的顺序无关与去重、`enable_multi_group=False` 回退、自定义分组标签、cosplay 元标签判定与落盘路径。
+覆盖内容包括：`by (画师:权重)` 等各种画师串被过滤、`角色名 (作品名)` 自动提取、转义括号与权重写法、`char:` 优先级、兜底命名、端到端产出的文件名；数据集精确/模糊匹配、短名归一、同名取热度最高、数据集缺失时的回退；**模糊匹配的停用词 / 长度 / 首字母 / cutoff 约束（含 `stage`→`sage` 回归用例）**；多角色分组（`Duo`/`Group`）的顺序无关与去重、父子角色去重、超量截断、cosplay 元标签判定，以及**面板只剩 6 个控件**的断言。
 
 ## 更新记录
 
-- **2026-09-14（二期）**：修复多角色命名问题——新增「多人自动分组」（2 人 → `双人`、3 人及以上 → `多人`，子目录名对角色名做确定性排序，tag 顺序变化不再产生新目录；可用「分组标签」自定义、可关闭回退旧拼接命名）；新增 cosplay 等元标签处理（`(cosplay)`、`(alternate_costume)` 等不再被当成作品名，查不到角色时用 `裸名_cosplay` 兜底）；数据集命中的角色名统一归一为**裸名**（`emilia_(re:zero)` → `emilia`），避免 `kita_ikuyo_(bocchi_the_rock!)_gotoh_hitori_(...)` 这类超长组合；新增 `tests/test_multi_group.py` 与 `_self_test()`。
+- **2026-09-14（三期）**：① 修复模糊匹配把 `stage` 误判为角色 `sage` 的问题（相似度 0.888 > 旧 cutoff 0.85）——新增 `_BARE_NAME_STOPWORDS` 停用词表、最低长度 4、长度差 ≤ 1、首字母相同、精确匹配优先，并把 cutoff 提到 **0.92**；② 精简节点面板到 6 个控件：移除 `character_list` / `max_tags` / `auto_extract` / `enable_multi_group` / `group_tags`，`mode` 默认改为「按角色分组文件夹」，`bare_name_mode` 默认改为「数据集模糊匹配」；③ 角色数量自动检测（全部收集 + 父子角色去重保留更长者 + 超过 8 个打 warning）；④ 分组目录改用英文 **`Duo` / `Group`**，规避中文路径的编码兼容性问题；⑤ `_self_test()` 扩充到 35 项断言。
+- **2026-09-14（二期）**：修复多角色命名问题——新增多人自动分组（2 人 → 双人目录、3 人及以上 → 多人目录，子目录名对角色名做确定性排序，tag 顺序变化不再产生新目录）；新增 cosplay 等元标签处理（`(cosplay)`、`(alternate_costume)` 等不再被当成作品名，查不到角色时用 `裸名_cosplay` 兜底）；数据集命中的角色名统一归一为**裸名**（`emilia_(re:zero)` → `emilia`），避免 `kita_ikuyo_(bocchi_the_rock!)_gotoh_hitori_(...)` 这类超长组合；新增 `tests/test_multi_group.py` 与 `_self_test()`。
 - **2026-09-14**：新增「无作品名角色识别」——内嵌 Danbooru 角色数据集（`data/characters.jsonl`，来源 [`Sn0w123/booru-characters`](https://huggingface.co/datasets/Sn0w123/booru-characters)），可识别 `Emilia`、`Rem` 这类没有作品名的裸名字 tag，支持「数据集精确匹配 / 数据集模糊匹配」两种模式，另有可选的「已知角色名名单」。同时支持 danbooru 下划线写法 `hakurei_reimu_(touhou)`；数据集缺失时自动回退原有逻辑，`关闭` 模式输出与旧版完全一致。新增 `download_dataset.py`（下载/转换/增量更新）与 `tests/test_bare_name.py`。
 - **2026-09-13**：修复画师串 tag 被误判为角色名的问题（典型现象：`by (ningen mame:0.5)` 产出 `by_(ningen_mame_0.5)_00001_.png`）。自动提取改为逐 tag 判定，过滤 `@画师` / `by 画师` / `by (画师:权重)` / `drawn by 画师` / `artist: 画师`，并补齐权重与转义括号处理；新增 `tests/test_extract.py`。
 - **2026-08-31**：首个版本。
