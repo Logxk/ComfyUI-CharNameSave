@@ -1,2 +1,14 @@
 __pycache__/
 *.pyc
+tests/_tmp_output/
+tests/_tmp_bare/
+tests/_tmp_load/
+
+# 数据集与下载缓存：
+# - data/characters.jsonl 由 download_dataset.py 生成（约 2 MB），也可手动放入
+# - data/characters.jsonl.meta 记录远端标识，供增量更新判断
+# - .hf_cache/ 保存下载到的原始文件（约 9 MB，可删）
+.hf_cache/
+.hfcache/
+data/characters.jsonl
+data/characters.jsonl.meta
