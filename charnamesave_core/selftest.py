@@ -145,10 +145,11 @@ def _run_self_test():
 
     注意：本项目是 ComfyUI 自定义节点包，模块名必须是 `__init__`，所以这里不用
     `if __name__ == "__main__"` 做入口（那样会在 ComfyUI / 单元测试里被误触发）。
+
     在本插件目录下，用你那份 ComfyUI 的解释器执行：
 
-        python tests/test_extract.py
-        python tests/test_bare_name.py
-        python tests/test_multi_group.py
+        python -c "import types,sys; sys.modules['folder_paths']=types.ModuleType('folder_paths'); c=types.ModuleType('comfy'); a=types.ModuleType('comfy.cli_args'); a.args=types.SimpleNamespace(disable_metadata=True); c.cli_args=a; sys.modules['comfy']=c; sys.modules['comfy.cli_args']=a; import __init__ as m; raise SystemExit(m._run_self_test())"
+
+    配合已下载/随仓库分发的 data/characters.jsonl 效果最好（含数据集相关的检查项）。
     """
     return _self_test()
