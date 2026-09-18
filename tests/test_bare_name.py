@@ -95,20 +95,20 @@ class BareNameFunctionTests(_IndexSwapMixin):
         self.assertIsNone(node._character_bare_name("rem", OFF))
 
     def test_exact_match_bare_name(self):
-        self.assertEqual(node._character_bare_name("emilia", EXACT), "emilia_(re_zero)")
-        self.assertEqual(node._character_bare_name("rem", EXACT), "rem_(re_zero)")
+        self.assertEqual(node._character_bare_name("emilia", EXACT), "emilia")
+        self.assertEqual(node._character_bare_name("rem", EXACT), "rem")
 
     def test_exact_match_is_case_insensitive(self):
-        self.assertEqual(node._character_bare_name("Emilia", EXACT), "emilia_(re_zero)")
-        self.assertEqual(node._character_bare_name("EMILIA", EXACT), "emilia_(re_zero)")
+        self.assertEqual(node._character_bare_name("Emilia", EXACT), "emilia")
+        self.assertEqual(node._character_bare_name("EMILIA", EXACT), "emilia")
 
     def test_underscore_and_space_forms_are_equivalent(self):
-        self.assertEqual(node._character_bare_name("hakurei reimu", EXACT), "hakurei_reimu_(touhou)")
-        self.assertEqual(node._character_bare_name("hakurei_reimu", EXACT), "hakurei_reimu_(touhou)")
+        self.assertEqual(node._character_bare_name("hakurei reimu", EXACT), "hakurei_reimu")
+        self.assertEqual(node._character_bare_name("hakurei_reimu", EXACT), "hakurei_reimu")
 
     def test_duplicate_bare_name_keeps_hottest_record(self):
         # rem_(re:zero) (10255) beats rem_(death_note) (160)
-        self.assertEqual(node._character_bare_name("rem", EXACT), "rem_(re_zero)")
+        self.assertEqual(node._character_bare_name("rem", EXACT), "rem")
 
     def test_name_without_copyright_is_returned_as_is(self):
         node._CHARACTER_INDEX.clear()
@@ -117,8 +117,8 @@ class BareNameFunctionTests(_IndexSwapMixin):
         self.assertEqual(node._character_bare_name("original kid", EXACT), "original_kid")
 
     def test_weights_are_stripped(self):
-        self.assertEqual(node._character_bare_name("(emilia:1.2)", EXACT), "emilia_(re_zero)")
-        self.assertEqual(node._character_bare_name("emilia:1.4", EXACT), "emilia_(re_zero)")
+        self.assertEqual(node._character_bare_name("(emilia:1.2)", EXACT), "emilia")
+        self.assertEqual(node._character_bare_name("emilia:1.4", EXACT), "emilia")
 
     def test_artist_tags_are_never_matched(self):
         self.assertIsNone(node._character_bare_name("@emilia (emilia):0.6", EXACT))
@@ -140,7 +140,7 @@ class BareNameFunctionTests(_IndexSwapMixin):
         self.assertIsNone(node._character_bare_name("2022", EXACT))
 
     def test_fuzzy_match_tolerates_typos(self):
-        self.assertEqual(node._character_bare_name("hakurei reimuu", FUZZY), "hakurei_reimu_(touhou)")
+        self.assertEqual(node._character_bare_name("hakurei reimuu", FUZZY), "hakurei_reimu")
 
     def test_fuzzy_short_tag_is_ignored(self):
         # "2b" is 2 chars -> below _FUZZY_MIN_LEN, so no fuzzy guessing
@@ -174,13 +174,13 @@ class AutoCandidateTests(_IndexSwapMixin):
     def test_exact_mode_guesses_bare_names(self):
         self.assertEqual(
             self.candidates(["masterpiece, 1girl, emilia, solo"], EXACT),
-            ["emilia_(re_zero)"],
+            ["emilia"],
         )
 
     def test_series_tags_still_win_over_bare_names(self):
         self.assertEqual(
             self.candidates(["emilia, denia (wuthering waves)"], EXACT),
-            ["denia_(wuthering_waves)", "emilia_(re_zero)"],
+            ["denia_(wuthering_waves)", "emilia"],
         )
 
     def test_artist_and_noise_tags_are_skipped_in_bare_mode(self):
@@ -205,8 +205,7 @@ class AutoCandidateTests(_IndexSwapMixin):
                 ["masterpiece, frieren, denia (wuthering waves), emilia, rem"],
                 EXACT,
             ),
-            ["denia_(wuthering_waves)", "frieren_(sousou_no_frieren)",
-             "emilia_(re_zero)", "rem_(re_zero)"],
+            ["denia_(wuthering_waves)", "frieren", "emilia", "rem"],
         )
 
 
@@ -215,7 +214,7 @@ class CharNamesTests(_IndexSwapMixin):
     def test_max_tags_limits_bare_matches(self):
         self.assertEqual(
             node._char_names(["emilia, rem, frieren"], True, 2, EXACT),
-            ["emilia_(re_zero)", "rem_(re_zero)"],
+            ["emilia", "rem"],
         )
 
     def test_char_tag_still_wins(self):
@@ -283,8 +282,9 @@ class SaveImagesBareModeTests(_IndexSwapMixin):
 
     def test_bare_name_names_the_file(self):
         filename, display = self._save("masterpiece, 1girl, emilia, solo", bare_name_mode="数据集精确匹配")
-        self.assertEqual(filename, "emilia_(re_zero)_00001_.png")
-        self.assertIn("emilia_(re_zero)", display)
+        # 二期起采用「短名优先」：裸名识别不再补作品名，避免多角色文件名过长
+        self.assertEqual(filename, "emilia_00001_.png")
+        self.assertIn("emilia", display)
 
     def test_default_mode_is_unchanged(self):
         filename, display = self._save("masterpiece, 1girl, emilia, solo")
@@ -382,14 +382,26 @@ class RealDatasetTests(unittest.TestCase):
         self.assertGreater(len(node._CHARACTER_NAMES_LOWER), 1000)
 
     def test_known_bare_characters(self):
+        # 数据集里这些角色都是裸名条目（kita_ikuyo 式），因此输出保持短名：
+        # 这是二期改进的预期行为 —— 避免多角色拼接出超长文件名。
         expected = {
-            "emilia": "emilia_(re_zero)",
-            "rem": "rem_(re_zero)",
-            "saber": "saber_(fate)",
-            "frieren": "frieren_(sousou_no_frieren)",
+            "emilia": "emilia",
+            "rem": "rem",
+            "saber": "saber",
+            "frieren": "frieren",
         }
         for tag, want in expected.items():
             self.assertEqual(node._character_bare_name(tag, EXACT), want, tag)
+
+    def test_bare_names_are_not_expanded_with_series(self):
+        # 明确锁定「短名优先」：kita_ikuyo / gotoh_hitori 不会被写成
+        # kita_ikuyo_(bocchi_the_rock!) 这种冗长形式
+        for tag in ("kita_ikuyo", "gotoh_hitori"):
+            got = node._character_bare_name(tag, EXACT)
+            if got is None:
+                continue  # 数据集里没有这个角色
+            self.assertNotIn("(", got, tag)
+            self.assertEqual(got, tag)
 
     def test_noise_tags_do_not_match(self):
         for tag in ("1girl", "solo", "masterpiece", "best quality", "long hair", "absurdres"):

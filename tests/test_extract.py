@@ -233,10 +233,10 @@ class SaveImagesTests(unittest.TestCase):
         node.folder_paths.get_save_image_path = fake_get_save_image_path
         self.saver = node.CharNameSaveImage()
 
-    def _save(self, text):
+    def _save(self, text, **kwargs):
         images = _FakeTensor(np.zeros((1, 8, 8, 3), dtype=np.float32))
         prompt = {"1": {"class_type": "CLIPTextEncode", "inputs": {"text": text}}}
-        result = self.saver.save_images(images, prompt=prompt)
+        result = self.saver.save_images(images, prompt=prompt, **kwargs)
         return result["ui"]["images"][0]["filename"], result["ui"]["text"][0]
 
     def test_artist_tag_uses_fallback_name(self):
@@ -254,8 +254,13 @@ class SaveImagesTests(unittest.TestCase):
 
     def test_joined_name_truncated_to_150_chars(self):
         text = ", ".join("char:" + c * 60 for c in "abc")
+        joined = ("a" * 60 + "_" + "b" * 60 + "_" + "c" * 60)[:150]
+        # 3 个角色 + 多人自动分组（默认开启）: 文件名带「多人」前缀
         filename, _ = self._save(text)
-        self.assertEqual(filename, ("a" * 60 + "_" + "b" * 60 + "_" + "c" * 60)[:150] + "_00001_.png")
+        self.assertEqual(filename, "多人_" + joined + "_00001_.png")
+        # 关闭多人自动分组后回到旧的多角色拼接命名
+        filename, _ = self._save(text, enable_multi_group=False)
+        self.assertEqual(filename, joined + "_00001_.png")
         self.assertEqual(len(filename) - len("_00001_.png"), 150)
 
     def test_grouped_folder_mode(self):
