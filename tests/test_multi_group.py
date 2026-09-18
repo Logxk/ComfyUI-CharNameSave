@@ -139,7 +139,6 @@ class _IndexSwapMixin(unittest.TestCase):
         self._saved = (
             dict(node._CHARACTER_INDEX),
             set(node._CHARACTER_NAMES_LOWER),
-            dict(node._CHARACTER_NAME_LOOKUP),
         )
         self.addCleanup(self._restore_index)
         self.tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_multi")
@@ -153,13 +152,11 @@ class _IndexSwapMixin(unittest.TestCase):
         node._load_character_index(dataset)
 
     def _restore_index(self):
-        index, names, lookup = self._saved
+        index, names = self._saved
         node._CHARACTER_INDEX.clear()
         node._CHARACTER_INDEX.update(index)
         node._CHARACTER_NAMES_LOWER.clear()
         node._CHARACTER_NAMES_LOWER.update(names)
-        node._CHARACTER_NAME_LOOKUP.clear()
-        node._CHARACTER_NAME_LOOKUP.update(lookup)
 
 
 class _SaveHarnessMixin(_IndexSwapMixin):

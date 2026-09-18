@@ -12,6 +12,14 @@
 3. 写入 ``data/characters.jsonl``（原子替换，增量更新：远端文件没变就跳过下载）；
 4. 打印统计信息（总条数、有作品名条数等）。
 
+安全护栏（不影响正常使用，只在异常时生效）：
+
+- 下载时校验实际字节数与 ``Content-Length`` 一致，并将总体积限制在 ``MAX_DOWNLOAD_BYTES``
+  以内；不一致（连接被截断）或超限时**直接失败**并删除临时文件，绝不写出残缺数据集。
+  （这些护栏不引入任何新依赖，只用标准库。）
+- 转换时严格解析：任何一行不是合法 JSON 都视为文件损坏（截断的典型表现）并报错退出，
+  不再静默跳过坏行——旧行为会把半个文件当成完整数据集写盘。
+
 用法::
 
     # 先进入本插件目录，再用「你那份 ComfyUI 的 Python 解释器」执行
@@ -43,9 +51,9 @@
 import argparse
 import json
 import os
-import shutil
 import sys
 import tempfile
+import urllib.request
 
 
 def _force_utf8_console():
@@ -138,8 +146,14 @@ def normalize_record(raw):
     return record
 
 
-def _iter_raw_records(text):
-    """逐行解析 JSONL，跳过空行与坏行。"""
+def _iter_raw_records(text, strict=True):
+    """逐行解析 JSONL；bad line 的处理方式由 strict 决定。
+
+    strict=True（默认，用于**新下载/新转换**的文件）：任何一行不是合法 JSON 都视为
+    文件损坏——截断的下载正是这种表现——直接抛 ValueError，绝不把半个文件当成完整
+    数据集写出。strict=False 保留旧行为（跳过坏行并打 warning），只给需要宽松解析的
+    调用方使用。
+    """
     for line_no, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line:
@@ -147,11 +161,14 @@ def _iter_raw_records(text):
         try:
             yield json.loads(line)
         except json.JSONDecodeError as exc:
+            if strict:
+                raise ValueError(
+                    f"第 {line_no} 行不是合法 JSON（文件可能已损坏/被截断）: {exc}") from exc
             print(f"[warn] 跳过第 {line_no} 行（JSON 解析失败：{exc}）", file=sys.stderr)
 
 
 def convert_text(text):
-    """原始 JSONL 文本 -> 精简记录列表（保持原有顺序）。"""
+    """原始 JSONL 文本 -> 精简记录列表（保持原有顺序）；坏行直接报错。"""
     records = []
     for raw in _iter_raw_records(text):
         record = normalize_record(raw)
@@ -170,16 +187,38 @@ def convert_file(src_path, limit=None):
 
 # --- 下载 -----------------------------------------------------------------
 
+# 下载体积上限：正常原始 JSONL 约 9 MB，留足余量。超限说明远端文件异常（或被换成了
+# 别的东西），直接中止，避免把磁盘写满。
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
+
+class DownloadTooLarge(Exception):
+    """下载体积超过 MAX_DOWNLOAD_BYTES。"""
+
+
+def _open_url(url, timeout=30, method=None):
+    """打开 URL；method 为 None 时用 GET，'HEAD' 时只取响应头。"""
+    request = urllib.request.Request(url, method=method, headers=_headers())
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _declared_size(response):
+    """响应的 Content-Length；缺失/非法/动态压缩时返回 None（此时不做字节数断言）。"""
+    if (response.headers.get("Content-Encoding") or "").strip().lower() not in ("", "identity"):
+        # 传输是 gzip 等压缩编码时，Content-Length 是压缩后长度，与落盘字节数不可比
+        return None
+    length = response.headers.get("Content-Length")
+    try:
+        return int(length) if length else None
+    except (TypeError, ValueError):
+        return None
+
 
 def remote_file_size(url, timeout=30):
     """HEAD 请求取远端文件大小；失败返回 None（此时不做增量跳过）。"""
-    import urllib.request
-
-    request = urllib.request.Request(url, method="HEAD", headers=_headers())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            length = response.headers.get("Content-Length")
-            return int(length) if length else None
+        with _open_url(url, timeout=timeout, method="HEAD") as response:
+            return _declared_size(response)
     except Exception as exc:  # noqa: BLE001 - 网络问题一律降级处理
         print(f"[warn] 无法获取远端文件大小（{exc}）", file=sys.stderr)
         return None
@@ -202,33 +241,51 @@ def resolve_url(repo_id=REPO_ID, filename=REMOTE_FILENAME):
         return f"https://huggingface.co/datasets/{repo_id}/resolve/main/{filename}"
 
 
-def download_to(url, dest_path, timeout=300, quiet=False):
-    """流式下载到 ``dest_path``（先写临时文件，成功后再原子替换）。"""
-    import urllib.request
+def download_to(url, dest_path, timeout=300, quiet=False, max_bytes=MAX_DOWNLOAD_BYTES):
+    """流式下载到 ``dest_path``（先写临时文件，成功后再原子替换）。
 
+    写出前会做两项校验，任一不通过都**不替换目标文件**并删除临时文件：
+
+    1. 实际写入字节数与服务端声明的 ``Content-Length`` 不一致（连接被中断/截断）；
+    2. 超过 ``max_bytes``（远端文件异常巨大，避免写满磁盘）。
+
+    服务端未声明长度（分块传输/压缩编码）时跳过第 1 项，只保留第 2 项的硬上限，
+    因此不会把正常下载误判为失败。
+    """
     tmp_path = f"{dest_path}.part-{os.getpid()}"
-    request = urllib.request.Request(url, headers=_headers())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response, open(tmp_path, "wb") as handle:
-            total = response.headers.get("Content-Length")
+        with _open_url(url, timeout=timeout) as response, open(tmp_path, "wb") as handle:
+            declared = _declared_size(response)
+            if declared is not None and declared > max_bytes:
+                raise DownloadTooLarge(
+                    f"远端文件声明大小 {declared} 字节，超过上限 {max_bytes} 字节")
             done = 0
             while True:
                 chunk = response.read(1 << 20)
                 if not chunk:
                     break
-                handle.write(chunk)
                 done += len(chunk)
-                if not quiet and total:
-                    print(f"\r  下载中 {done / 1048576:.1f}/{int(total) / 1048576:.1f} MB", end="")
-        if not quiet and total:
-            print()
+                if done > max_bytes:
+                    raise DownloadTooLarge(
+                        f"下载已超过上限 {max_bytes} 字节，已中止")
+                handle.write(chunk)
+                if not quiet and declared:
+                    print(f"\r  下载中 {done / 1048576:.1f}/{declared / 1048576:.1f} MB", end="")
+            handle.flush()
+            os.fsync(handle.fileno())
+            if not quiet and declared:
+                print()
+            # 截断检测：字节数对不上说明传输不完整，宁可不替换也不留半个文件
+            if declared is not None and done != declared:
+                raise IOError(
+                    f"下载不完整：收到 {done} 字节，服务端声明 {declared} 字节")
         os.replace(tmp_path, dest_path)
     except BaseException:
-        if os.path.exists(tmp_path):
-            try:
+        try:
+            if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-            except OSError:
-                pass
+        except OSError:
+            pass
         raise
 
 
@@ -268,6 +325,10 @@ def fetch_raw_file(args, url):
         os.makedirs(os.path.dirname(raw_path), exist_ok=True)
         download_to(url, raw_path)
         return raw_path
+    except DownloadTooLarge as exc:
+        # 体积护栏触发：远端文件异常，换 huggingface_hub 也一样超限，直接给出结论
+        print(f"[error] {exc}", file=sys.stderr)
+        return None
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] 直连下载失败（{type(exc).__name__}: {exc}）")
 
@@ -358,26 +419,34 @@ def main(argv=None):
         description="下载/转换 Sn0w123/booru-characters 数据集到本插件的 data/characters.jsonl",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--out", default=OUTPUT_PATH, help=f"输出路径（默认 {OUTPUT_PATH}）")
+    parser.add_argument("--out", default=OUTPUT_PATH,
+                        help=f"输出路径（默认插件目录下的 {OUTPUT_PATH}；相对路径按当前工作目录解析）")
     parser.add_argument("--repo", default=REPO_ID, help=f"Hugging Face 数据集仓库（默认 {REPO_ID}）")
     parser.add_argument("--filename", default=REMOTE_FILENAME, help="远端文件名（默认 characters.jsonl）")
-    parser.add_argument("--from-file", default=None, help="不联网，直接转换本地已下载的原始 JSONL")
+    parser.add_argument("--from-file", default=None,
+                        help="不联网，直接把本地已下载的原始 JSONL 转成精简数据集；"
+                             "相对路径按当前工作目录解析（注意：这条路径不经过下载完整性校验）")
     parser.add_argument("--force", action="store_true", help="忽略增量检查，强制重新下载")
-    parser.add_argument("--limit", type=int, default=None, help="只保留前 N 条（调试用）")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="只保留前 N 条（调试用；会写出一个不完整的数据集，别当成正式数据用）")
     parser.add_argument("--print-url", action="store_true", help="只打印手动下载链接后退出")
     args = parser.parse_args(argv)
 
     url = resolve_url(args.repo, args.filename)
 
     if args.print_url:
+        # 这里打印解析后的绝对路径，与真正写出的位置一致（普通模式也是先 abspath 再写）
         print("手动下载地址:")
         print(f"  数据文件: {url}")
-        print(f"  数据集页: https://huggingface.co/datasets/{args.repo}")
-        print(f"下载后把文件放到: {args.out}")
+        print(f"  数据集页: {DATASET_PAGE}")
+        print(f"下载后把文件放到: {os.path.abspath(args.out)}")
         return 0
 
     out_path = os.path.abspath(args.out)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_dir = os.path.dirname(out_path)
+    # --out 只给文件名时 dirname 是空串，旧写法会 makedirs("") 直接抛异常
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     raw_file = None
     remote_size = None
@@ -398,13 +467,19 @@ def main(argv=None):
             if records:
                 print_stats(records, out_path)
                 return 0
-            print("[warn] 本地输出无法解析，改为重新下载。")
+            print("[warn] 本地输出无法解析或为空，改为重新下载。")
 
         raw_file = fetch_raw_file(args, url)
         if raw_file is None:
             return 1
 
-    records = convert_file(raw_file, args.limit)
+    try:
+        records = convert_file(raw_file, args.limit)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"[error] 原始文件无法解析: {exc}", file=sys.stderr)
+        print("       文件可能下载不完整，请删掉 .hf_cache/ 下对应文件后重试，"
+              "或加 --force 强制重新下载。", file=sys.stderr)
+        return 1
     if not records:
         print("[error] 转换后没有任何有效记录，请检查原始文件格式。", file=sys.stderr)
         return 1

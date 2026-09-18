@@ -65,7 +65,6 @@ class _IndexSwapMixin(unittest.TestCase):
         self._saved = (
             dict(node._CHARACTER_INDEX),
             set(node._CHARACTER_NAMES_LOWER),
-            dict(node._CHARACTER_NAME_LOOKUP),
         )
         self.addCleanup(self._restore)
         self.tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_bare")
@@ -79,13 +78,11 @@ class _IndexSwapMixin(unittest.TestCase):
         node._load_character_index(self.dataset)
 
     def _restore(self):
-        index, names, lookup = self._saved
+        index, names = self._saved
         node._CHARACTER_INDEX.clear()
         node._CHARACTER_INDEX.update(index)
         node._CHARACTER_NAMES_LOWER.clear()
         node._CHARACTER_NAMES_LOWER.update(names)
-        node._CHARACTER_NAME_LOOKUP.clear()
-        node._CHARACTER_NAME_LOOKUP.update(lookup)
 
 
 class BareNameFunctionTests(_IndexSwapMixin):
@@ -389,18 +386,15 @@ class DatasetLoadingTests(unittest.TestCase):
         self._saved = (
             dict(node._CHARACTER_INDEX),
             set(node._CHARACTER_NAMES_LOWER),
-            dict(node._CHARACTER_NAME_LOOKUP),
         )
         self.addCleanup(self._restore)
 
     def _restore(self):
-        index, names, lookup = self._saved
+        index, names = self._saved
         node._CHARACTER_INDEX.clear()
         node._CHARACTER_INDEX.update(index)
         node._CHARACTER_NAMES_LOWER.clear()
         node._CHARACTER_NAMES_LOWER.update(names)
-        node._CHARACTER_NAME_LOOKUP.clear()
-        node._CHARACTER_NAME_LOOKUP.update(lookup)
 
     def test_missing_file_is_not_an_error(self):
         self.assertEqual(node._load_character_index(os.path.join(self.tmp_dir, "nope.jsonl")), 0)
