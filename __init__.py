@@ -743,12 +743,12 @@ class CharNameSaveImage:
                 "max_tags": ("INT", {
                     "default": 1, "min": 1, "max": 10,
                     "label": "角色名数量上限",
-                    "tooltip": "自动提取时最多采用的角色名数量，多个名字用 _ 连接；多角色建议用 char: 角色名 显式标记。",
+                    "tooltip": "自动提取时最多采用的角色名数量，多个名字用 _ 连接；识别到 2 个及以上时按「多人自动分组」处理。多角色建议用 char: 角色名 显式标记。",
                 }),
                 "bare_name_mode": (_BARE_NAME_MODES, {
                     "default": _BARE_NAME_MODE_OFF,
                     "label": "无作品名角色识别",
-                    "tooltip": "识别没有作品名后缀的裸名字 tag（如 Emilia、Rem、frieren）。关闭: 只按原有「角色名 (作品名)」规则识别；数据集精确匹配: 名字需与内嵌 Danbooru 角色数据集命中（忽略大小写与下划线/空格差异，并自动补上数据集里的作品名）；数据集模糊匹配: 在精确匹配基础上允许 difflib 近似匹配（cutoff 0.85），可容忍拼写/空格差异，但可能误判。数据集位于 data/characters.jsonl，用 download_dataset.py 下载；文件缺失时三种模式都自动回退到原有逻辑。",
+                    "tooltip": "识别没有作品名后缀的裸名字 tag（如 Emilia、Rem、frieren）。关闭: 只按原有「角色名 (作品名)」规则识别；数据集精确匹配: 名字需与内嵌 Danbooru 角色数据集命中（忽略大小写与下划线/空格差异，输出数据集里的短名，如 emilia）；数据集模糊匹配: 在精确匹配基础上允许 difflib 近似匹配（cutoff 0.85），可容忍拼写/空格差异，但可能误判。数据集位于 data/characters.jsonl，用 download_dataset.py 下载；文件缺失时三种模式都自动回退到原有逻辑。",
                 }),
                 "character_list": ("STRING", {
                     "default": "",
