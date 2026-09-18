@@ -1,8 +1,8 @@
 """Unit tests for the dataset-backed "bare character name" recognition.
 
-Run with the ComfyUI embedded interpreter, e.g.
+在仓库根目录（本插件目录）下用你那份 ComfyUI 的解释器运行：
 
-    F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_bare_name.py
+    python tests/test_bare_name.py
 
 Two kinds of tests:
 

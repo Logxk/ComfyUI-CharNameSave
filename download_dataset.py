@@ -14,14 +14,18 @@
 
 用法::
 
-    # 在 ComfyUI 的 Python 环境里执行（推荐）
-    F:\\ComfyUI\\venv\\Scripts\\python.exe download_dataset.py
+    # 先进入本插件目录，再用「你那份 ComfyUI 的 Python 解释器」执行
+    cd /d <你的 ComfyUI>/custom_nodes/ComfyUI-CharNameSave
+    python download_dataset.py
 
     # 常用参数
     python download_dataset.py --force            # 忽略增量检查，强制重新下载
     python download_dataset.py --print-url        # 只打印下载链接（手动下载用）
     python download_dataset.py --from-file raw.jsonl   # 用本地已下载的原始文件转换
     python download_dataset.py --limit 500        # 只保留前 500 条（调试用）
+
+    便携版 / 整合包的解释器一般在 <你的 ComfyUI>/python_embeded/python.exe，
+    手动部署的可能是 <你的 ComfyUI>/venv/Scripts/python.exe。
 
 也可以完全不用本脚本：手动把符合下列格式的 ``characters.jsonl`` 放进 ``data/``
 目录即可，插件启动时会自动加载。

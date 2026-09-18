@@ -30,17 +30,22 @@
 2. **重启 ComfyUI**（改动过插件代码也要重启，Python 模块会被缓存）。
 3. 无需 `pip install`。
 
-**可选**：想识别没有作品名的裸名字（`Emilia`、`Rem`、`frieren` 这类），需要下载一次角色数据集：
+**可选**：想识别没有作品名的裸名字（`Emilia`、`Rem`、`frieren` 这类），需要下载一次角色数据集。
+
+先进入本插件目录（不同安装方式的路径不同，按自己的来），然后执行下载脚本：
 
 ```bat
-F:\ComfyUI\venv\Scripts\python.exe download_dataset.py
+cd /d <你的 ComfyUI>\custom_nodes\ComfyUI-CharNameSave
+python download_dataset.py
 ```
 
-脚本会从 Hugging Face 下载 [`Sn0w123/booru-characters`](https://huggingface.co/datasets/Sn0w123/booru-characters) 并生成 `data/characters.jsonl`（约 2 MB，两万余条角色）。下载失败时会打印手动下载指引：
+> `python` 要换成**你那份 ComfyUI 用的解释器**：便携版/整合包通常是 `..\..\python_embeded\python.exe`，手动部署的可能是 `..\..\venv\Scripts\python.exe`，桌面版请在它的 Python 环境里执行。系统里已经装好 Python 且能直接运行 `python` 的话，上面的命令就能用。
+
+脚本会从 Hugging Face 下载 [`Sn0w123/booru-characters`](https://huggingface.co/datasets/Sn0w123/booru-characters) 并生成 `data/characters.jsonl`（约 2 MB，两万余条角色）。下载失败时脚本会打印手动下载指引，也可以主动查看：
 
 ```bat
-F:\ComfyUI\venv\Scripts\python.exe download_dataset.py --print-url
-F:\ComfyUI\venv\Scripts\python.exe download_dataset.py --from-file characters.jsonl
+python download_dataset.py --print-url
+python download_dataset.py --from-file <下载到的 characters.jsonl>
 ```
 
 不下载也能正常使用，只是「无作品名角色识别」不可用，其余功能不受影响。
@@ -106,10 +111,13 @@ F:\ComfyUI\venv\Scripts\python.exe download_dataset.py --from-file characters.js
 
 ## 测试
 
+在本插件目录下执行（同样把 `python` 换成你那份 ComfyUI 的解释器）：
+
 ```bat
-F:\ComfyUI\venv\Scripts\python.exe tests\test_extract.py
-F:\ComfyUI\venv\Scripts\python.exe tests\test_bare_name.py
-F:\ComfyUI\venv\Scripts\python.exe tests\test_multi_group.py
+cd /d <你的 ComfyUI>\custom_nodes\ComfyUI-CharNameSave
+python tests\test_extract.py
+python tests\test_bare_name.py
+python tests\test_multi_group.py
 ```
 
 ## 许可证

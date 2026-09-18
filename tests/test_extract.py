@@ -1,8 +1,8 @@
 """Unit tests for the character-name extraction of ComfyUI-CharNameSave.
 
-Run with the ComfyUI embedded interpreter, e.g.
+在仓库根目录（本插件目录）下用你那份 ComfyUI 的解释器运行：
 
-    F:\\ComfyUI-aki-v3\\python\\python.exe tests\\test_extract.py
+    python tests/test_extract.py
 
 `folder_paths` / `comfy.cli_args` are stubbed so the node module can be
 imported outside of ComfyUI.

@@ -1,8 +1,8 @@
 """多人自动分组（Duo / Group）、模糊匹配约束（stage→sage 回归）与面板精简的测试。
 
-Run with the ComfyUI embedded interpreter, e.g.
+在仓库根目录（本插件目录）下用你那份 ComfyUI 的解释器运行：
 
-    F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_multi_group.py
+    python tests/test_multi_group.py
 
 内容：
 

@@ -956,9 +956,11 @@ _load_character_index()
 def _self_test():
     """极简自测：模糊匹配约束（stage/sage）、多人分组与 cosplay 元标签。
 
-    只依赖纯函数（不写磁盘、不需要 ComfyUI），配合已下载的数据集效果最好：
+    只依赖纯函数（不写磁盘、不需要 ComfyUI 启动），配合已下载的数据集效果最好。
+    在本插件目录下用你那份 ComfyUI 的解释器执行（下面这条会临时 stub 掉
+    folder_paths / comfy.cli_args，因此在 ComfyUI 之外也能跑）：
 
-        F:\\ComfyUI\\venv\\Scripts\\python.exe -c "import sys; sys.path.insert(0, r'F:\\ComfyUI\\custom_nodes\\ComfyUI-CharNameSave'); import __init__ as m; raise SystemExit(m._run_self_test())"
+        python -c "import sys,types; sys.modules['folder_paths']=types.ModuleType('folder_paths'); c=types.ModuleType('comfy'); a=types.ModuleType('comfy.cli_args'); a.args=types.SimpleNamespace(disable_metadata=True); c.cli_args=a; sys.modules['comfy']=c; sys.modules['comfy.cli_args']=a; import importlib.util as u; s=u.spec_from_file_location('m','__init__.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('self test:', 'FAIL' if m._run_self_test() else 'PASS')"
 
     每项打印「标签: got=… want=…」，全部通过时返回 0。
     """
@@ -1077,15 +1079,15 @@ def _run_self_test():
 
     注意：本项目是 ComfyUI 自定义节点包，模块名必须是 `__init__`，所以这里不用
     `if __name__ == "__main__"` 做入口（那样会在 ComfyUI / 单元测试里被误触发）。
-    运行方式：
+    在本插件目录下，用你那份 ComfyUI 的解释器执行：
 
-        F:\\ComfyUI\\venv\\Scripts\\python.exe -c "import sys; sys.path.insert(0, r'F:\\ComfyUI\\custom_nodes\\ComfyUI-CharNameSave'); import __init__ as m; raise SystemExit(m._run_self_test())"
+        python -c "import sys,types; sys.modules['folder_paths']=types.ModuleType('folder_paths'); c=types.ModuleType('comfy'); a=types.ModuleType('comfy.cli_args'); a.args=types.SimpleNamespace(disable_metadata=True); c.cli_args=a; sys.modules['comfy']=c; sys.modules['comfy.cli_args']=a; import importlib.util as u; s=u.spec_from_file_location('m','__init__.py'); m=u.module_from_spec(s); s.loader.exec_module(m); raise SystemExit(m._run_self_test())"
 
     或者直接跑正式测试（推荐，断言更全）：
 
-        F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_extract.py
-        F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_bare_name.py
-        F:\\ComfyUI\\venv\\Scripts\\python.exe tests\\test_multi_group.py
+        python tests/test_extract.py
+        python tests/test_bare_name.py
+        python tests/test_multi_group.py
     """
     return _self_test()
 
