@@ -73,6 +73,19 @@ _BARE_NAME_STOPWORDS = frozenset({
     "masterpiece", "best quality", "highres", "absurdres", "ultra detailed",
     "very aesthetic", "official art", "anime style", "photorealistic",
     "artist name", "watermark", "signature", "english text", "japanese text",
+    # 通用「描述词」型条目：数据集里存在一批**没有专名**的 `(original)` 记录，
+    # 名字本身就是通用描述词（fox_girl_(togutogu) / cat_girl_(andaerz) 等），
+    # 热度极低（101–427）。它们与提示词里的通用 tag 逐字同名，会被「去括号基础名
+    # 精确匹配」直接命中，把只有 1 个角色的提示词凑成 2 个，误进 Duo 分组。
+    # 触发案例：`fox_girl` + `shinano \(azur_lane\)` 产出
+    # "fox_girl_shinano_(azur_lane)_00001_.png"（单人被判成双人）。
+    # 只屏蔽这些「裸通用词」；带专名/作品的真角色（inkling_girl、cow_girl、
+    # cat_girl_(andaerz)、chainsaw_man 之类）不受影响，写 "名字 (作品名)" 或
+    # char: 标记照样识别。
+    "girl", "boy",
+    "fox girl", "fox girls", "cat girl", "cat girls", "bunny girl", "bunny girls",
+    "mouse girl", "blonde dog girl", "blonde girl", "ahoge girl", "angel girl",
+    "receptionist girl", "thai girl", "old man", "white-haired man", "gunpla boy",
 })
 # 尾部 "_xxx)" 或 " xxx)" 后缀：danbooru 用来消歧的 costume/版本名
 _DISAMBIG_SUFFIX_RE = re.compile(r"[_\s]\(([^()]*)\)$")

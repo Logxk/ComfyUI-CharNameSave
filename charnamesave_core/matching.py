@@ -302,6 +302,12 @@ def _dataset_lookup(tag: str, mode: str = _BARE_NAME_MODE_EXACT) -> tuple[dict |
         return None, None
     if not _CHARACTER_NAMES_LOWER:
         return None, None
+    # 停用词表必须在**精确匹配之前**生效：数据集里存在名字就是通用描述词的
+    # (original) 记录（fox_girl_(togutogu)、cat_girl_(andaerz) 等），提示词里的
+    # 通用 tag 会与它们逐字同名而被精确命中，把单人提示词凑成双人、误进 Duo 分组。
+    # 原实现只在模糊分支里查停用词，精确路径完全绕过，因此拦不住这类条目。
+    if key in _BARE_NAME_STOPWORDS:
+        return None, None
 
     # --- 1) 精确匹配（第三轮要求：模糊匹配之前必须先做一次精确匹配）---
     index = _dataset_mod._CHARACTER_INDEX
