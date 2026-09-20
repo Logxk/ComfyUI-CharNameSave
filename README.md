@@ -139,6 +139,35 @@ python download_dataset.py --from-file <下载到的 characters.jsonl>
 > 确定性择优，不依赖集合遍历顺序，因此不受 Python 哈希随机化影响，重启 ComfyUI
 > 或换一台机器都不会把同一张图存进不同目录。
 
+#### 什么会被拒绝，以及为什么
+
+角色识别按「证据强弱」分层，弱证据必须自己证明自己：
+
+| 情况 | 行为 | 例子 |
+| --- | --- | --- |
+| 显式写法 | **永远识别**，不受任何通用词过滤影响 | `char:bow`、`bow (some series)` |
+| 通用词兼角色名 | **拒绝裸名**（要写全名或用 `char:`） | `bow`、`professor`、`ribbon`、`shirt`、`elf` |
+| 歧义裸名 | **拒绝**，避免张冠李戴 | `miku`（数据集里叫 `miku` 的是《Darling in the Franxx》的角色，春未来是 `hatsune_miku`） |
+| 压倒性唯一 | 识别 | `rem`（`rem_(re:zero)` 10255 热度 vs 次高 160）、`remilia` → `remilia_scarlet`（62115） |
+
+原因是数据集里存在大量「普通英文词恰好也是某个角色名」的条目：
+`bow_(paper_mario)`、`professor_(ragnarok_online)`、`ribbon_(kirby)`、`elf_(dragon's_crown)`…
+若照单全收，`professor_niyaniya (blue archive), bow` 这种单人提示词会被凑成双人并落进 `Duo` 目录
+（实测会产出 `Duo_bow_professor_niyaniya_(blue_archive)`）——**弱证据不能覆盖强证据**。
+
+拒绝时的处理：该 tag 退回普通 tag 语义，不再参与角色命名；若整条提示词没有别的角色，
+就走「兜底名称」。想强制指定这些名字，用显式写法即可：
+
+```
+char:bow            -> bow
+bow (paper mario)   -> bow_(paper_mario)
+```
+
+模糊匹配在「只写了名字开头」时会被拒绝（要求打字完整度 ≥ 55%）：
+`kita ikuy` → `kita_ikuyo` 可识别；`denia` 不会被猜成
+`denia (wuthering waves)`，只会用你写的 `denia`。
+
+
 `(cosplay)`、`(alternate_costume)`、`(clothing_swap)`、`(crossdressing)` 等元标签不会被当成作品名；数据集查不到该角色时会退化为 `角色名_cosplay`。
 
 ### 命名规则
