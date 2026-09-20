@@ -39,6 +39,7 @@ from .constants import (
     _SCORE_DATASET_FUZZY,
     _SCORE_EXPLICIT_CHAR,
     _SCORE_EXPLICIT_SERIES,
+    _is_generic_word_combination,
     _SCORE_FUZZY_COVERAGE,
     _SCORE_GENERIC_PENALTY,
     _SCORE_OTHER_COPYRIGHT,
@@ -745,7 +746,7 @@ def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
     if not key or key.isdigit() or not _CHARACTER_NAMES_LOWER:
         return None
     # 通用词屏蔽：即使数据集里有同名角色也不允许裸名命中（显式写法不受影响）
-    if key in _BARE_NAME_EXACT_BLOCKLIST:
+    if key in _BARE_NAME_EXACT_BLOCKLIST or _is_generic_word_combination(key):
         return None
 
     index = _dataset_mod._CHARACTER_INDEX

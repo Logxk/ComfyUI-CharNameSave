@@ -146,21 +146,31 @@ python download_dataset.py --from-file <下载到的 characters.jsonl>
 | 情况 | 行为 | 例子 |
 | --- | --- | --- |
 | 显式写法 | **永远识别**，不受任何通用词过滤影响 | `char:bow`、`bow (some series)` |
-| 通用词兼角色名 | **拒绝裸名**（要写全名或用 `char:`） | `bow`、`professor`、`ribbon`、`shirt`、`elf` |
+| 通用词兼角色名 | **拒绝裸名**（要写全名或用 `char:`） | `bow`、`professor`、`ribbon`、`shirt`、`elf`、`black hat` |
 | 歧义裸名 | **拒绝**，避免张冠李戴 | `miku`（数据集里叫 `miku` 的是《Darling in the Franxx》的角色，春未来是 `hatsune_miku`） |
 | 压倒性唯一 | 识别 | `rem`（`rem_(re:zero)` 10255 热度 vs 次高 160）、`remilia` → `remilia_scarlet`（62115） |
 
+判断「通用词」有两种入口，都会拒绝且都不影响显式写法：
+
+1. **整词命中通用词表**：`bow`、`professor`、`ribbon` …
+2. **整名由通用词拼成**：`black_hat_(villainous)` 的裸键 `black hat` 里
+   `black` 与 `hat` 都是通用词，因此这个裸键不参与识别
+   （实测该键会让提示词里的 `black hat` 变成角色、单人落进 `Duo`）。
+   只要有一个词不是通用词就不受影响：`bow professor niyaniya` 正常识别。
+
 原因是数据集里存在大量「普通英文词恰好也是某个角色名」的条目：
-`bow_(paper_mario)`、`professor_(ragnarok_online)`、`ribbon_(kirby)`、`elf_(dragon's_crown)`…
-若照单全收，`professor_niyaniya (blue archive), bow` 这种单人提示词会被凑成双人并落进 `Duo` 目录
-（实测会产出 `Duo_bow_professor_niyaniya_(blue_archive)`）——**弱证据不能覆盖强证据**。
+`bow_(paper_mario)`、`professor_(ragnarok_online)`、`ribbon_(kirby)`、`elf_(dragon's_crown)`、
+`black_hat_(villainous)`… 若照单全收，`professor_niyaniya (blue archive), bow` 这种单人提示词
+会被凑成双人并落进 `Duo` 目录（实测会产出 `Duo_bow_professor_niyaniya_(blue_archive)`）
+——**弱证据不能覆盖强证据**。
 
 拒绝时的处理：该 tag 退回普通 tag 语义，不再参与角色命名；若整条提示词没有别的角色，
 就走「兜底名称」。想强制指定这些名字，用显式写法即可：
 
 ```
-char:bow            -> bow
-bow (paper mario)   -> bow_(paper_mario)
+char:bow                     -> bow
+bow (paper mario)            -> bow_(paper_mario)
+char:black_hat_(villainous)  -> black_hat_(villainous)
 ```
 
 模糊匹配在「只写了名字开头」时会被拒绝（要求打字完整度 ≥ 55%）：

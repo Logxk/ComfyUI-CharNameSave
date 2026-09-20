@@ -15,6 +15,7 @@ from .constants import (
     _DISAMBIG_SUFFIX_RE,
     _DISAMBIG_SUFFIX_FULL_RE,
     _MAX_DATASET_BYTES,
+    _is_generic_word_combination,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -133,7 +134,12 @@ def _load_character_index_locked(path: str) -> int:
             # 也作为精确匹配键。若发生冲突（rem_(re:zero) / rem_(death_note)），
             # 仍然保留 post_count 更高的那个；数据集中没有裸名条目时才建立这个键。
             base_key = _DISAMBIG_SUFFIX_RE.sub("", key).strip()
-            if base_key and base_key != key and base_key not in _CHARACTER_INDEX:
+            # 若基础名整体由通用词组成（black_hat_(villainous) -> "black hat"），
+            # 就不要派生这个裸键：它与提示词里的服装/构图 tag 完全同名，
+            # 会被精确命中而变成角色（实测 bug：black hat 让单人提示词落进 Duo）。
+            if (base_key and base_key != key
+                    and not _is_generic_word_combination(base_key)
+                    and base_key not in _CHARACTER_INDEX):
                 _CHARACTER_INDEX[base_key] = record
                 # 基础名同样进入「已知名字集合」：精确/模糊匹配都要能用，
                 # 并且 _dataset_short_name 靠它判断能不能安全地只用短名。

@@ -135,6 +135,10 @@ _BARE_NAME_EXACT_BLOCKLIST = frozenset({
     "office", "classroom", "indoors", "outdoors", "room", "kitchen",
     "bedroom", "street", "garden", "forest", "mountain", "ocean",
     "sky", "cloud", "clouds", "rain", "snow", "wind", "fire", "water",
+    # 通用组合（由上面这些通用词拼出来，单独列出以便一眼看清实测案例）
+    "black hat", "black skirt", "black jacket", "pleated skirt", "peaked cap",
+    "white gloves", "long sleeves", "green halo", "double v", "point of view",
+    "demon tail", "black tail", "pointy ears",
     # 通用描述词（_original 记录里的「无名」条目，名字本身就是描述）
     "girl", "boy", "fox girl", "fox girls", "cat girl", "cat girls",
     "bunny girl", "bunny girls", "mouse girl", "blonde girl", "blonde dog girl",
@@ -174,6 +178,37 @@ _ACCEPT_THRESHOLD_FUZZY = 45
 #   "denia" -> "denia (wuthering waves)"       5/24  = 0.21 -> 低于下限，不接受
 _FUZZY_MIN_COVERAGE = 0.55
 _SCORE_FUZZY_COVERAGE = 40
+
+# 由屏蔽表**自动展开**出的通用单词集合：既包含单词条目本身，也把多词条目拆成词，
+# 用于判断「一个由若干词组成的组合名」是否整体都是通用描述。
+# 例：black_hat_(villainous) 的裸键 "black hat" 拆开后 black / hat 都在集合里，
+#     因此它不该被派生（实测该键会让提示词里的 `black hat` 变成角色）。
+# 宁可多收几个词也不能漏：漏掉的后果是普通 tag 变角色（用户可见的错误命名），
+# 多收的后果只是某个真实角色需要写全名或用 char:。
+_GENERIC_WORDS = frozenset(
+    word
+    for entry in _BARE_NAME_EXACT_BLOCKLIST
+    for word in entry.split()
+) | frozenset({
+    "black", "white", "red", "blue", "green", "yellow", "purple", "pink",
+    "brown", "grey", "gray", "silver", "gold", "orange", "blonde", "long",
+    "short", "very", "large", "small", "big", "little", "pointy", "demon",
+    "peaked", "pleated", "double", "between", "sleeves", "band", "tail",
+    "ears", "eyes", "hair", "gloves", "skirt", "jacket", "coat", "cap",
+})
+
+
+def _is_generic_word_combination(text: str) -> bool:
+    """文本是否由**全部是通用词**的词组成（用于拒绝通用组合名当角色）。
+
+    空串或只含一个通用词的短语都算通用；只要有一个词不是通用词就返回 False，
+    以免误伤 "bow professor niyaniya"（niyaniya 不是通用词）这类真角色名。
+    """
+    words = [w for w in (text or "").replace("_", " ").lower().split() if w]
+    if not words:
+        return False
+    return all(w in _GENERIC_WORDS for w in words)
+
 
 # 尾部 "_xxx)" 或 " xxx)" 后缀：danbooru 用来消歧的 costume/版本名
 _DISAMBIG_SUFFIX_RE = re.compile(r"[_\s]\(([^()]*)\)$")
