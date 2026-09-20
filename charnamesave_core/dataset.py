@@ -23,6 +23,10 @@ _LOGGER = logging.getLogger(__name__)
 _CHARACTER_INDEX = {}
 # 所有角色名的小写集合（下划线转空格），供精确/模糊匹配
 _CHARACTER_NAMES_LOWER = set()
+# 复合名 -> 首个词别名。例如 "remilia_scarlet"（touhou, 62115）会生成别名
+# "remilia" -> ["remilia_scarlet", ...]。数据集体量下这类别名约 1 万个，
+# 其中 3400 个有多个候选（歧义），由调用方结合上下文/热度裁决，见 matching.py。
+_CHARACTER_ALIASES: dict[str, list[str]] = {}
 # 数据集版本号：每次重新加载自增，用于让上层模糊匹配缓存失效（性能优化）。
 _DATASET_VERSION = 0
 # 重入保护：避免并发调用 _load_character_index 时把索引清空到一半（读取方会看到
@@ -66,6 +70,7 @@ def _load_character_index_locked(path: str) -> int:
 
     _CHARACTER_INDEX.clear()
     _CHARACTER_NAMES_LOWER.clear()
+    _CHARACTER_ALIASES.clear()
     if not os.path.isfile(path):
         message = f"角色数据集不存在，已跳过加载（无作品名角色识别不可用）: {path}"
         try:
@@ -133,6 +138,11 @@ def _load_character_index_locked(path: str) -> int:
                 # 基础名同样进入「已知名字集合」：精确/模糊匹配都要能用，
                 # 并且 _dataset_short_name 靠它判断能不能安全地只用短名。
                 _CHARACTER_NAMES_LOWER.add(base_key)
+            # 复合名的首个词别名：remilia_scarlet -> remilia。只在「该裸名本身
+            # 没有原生记录」时登记，避免与真实同名角色抢匹配；歧义由调用方裁决。
+            first_word = key.split(" ", 1)[0]
+            if " " in key and first_word not in _CHARACTER_INDEX:
+                _CHARACTER_ALIASES.setdefault(first_word, []).append(key)
             loaded += 1
 
     if bad_lines:

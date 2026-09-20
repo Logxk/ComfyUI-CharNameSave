@@ -7,12 +7,16 @@ keyed on the dataset version, so repeated prompts skip the O(N) similarity scan.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
 
 from . import dataset as _dataset_mod
 from .constants import (
     _ARTIST_IN_NAME_RE,
+    _ACCEPT_THRESHOLD_EXACT,
+    _ACCEPT_THRESHOLD_FUZZY,
+    _BARE_NAME_EXACT_BLOCKLIST,
     _BARE_NAME_MIN_LEN,
     _BARE_NAME_MODE_EXACT,
     _BARE_NAME_MODE_FUZZY,
@@ -22,6 +26,7 @@ from .constants import (
     _DISAMBIG_SUFFIX_RE,
     _FUZZY_CUTOFF,
     _FUZZY_MAX_LEN_DIFF,
+    _FUZZY_MIN_COVERAGE,
     _META_SERIES,
     _META_SERIES_KEEP_NAME,
     _META_SERIES_MIN_LEN,
@@ -29,6 +34,18 @@ from .constants import (
     _META_SERIES_TAG_RE,
     _NUMBER_RE,
     _PLAIN_NAME_RE,
+    _SCORE_DATASET_ALIAS,
+    _SCORE_DATASET_EXACT,
+    _SCORE_DATASET_FUZZY,
+    _SCORE_EXPLICIT_CHAR,
+    _SCORE_EXPLICIT_SERIES,
+    _SCORE_FUZZY_COVERAGE,
+    _SCORE_GENERIC_PENALTY,
+    _SCORE_OTHER_COPYRIGHT,
+    _SCORE_POST_100,
+    _SCORE_POST_1000,
+    _SCORE_POST_10000,
+    _SCORE_SAME_COPYRIGHT,
     _SERIES_NAME_RE,
     _SERIES_NAME_TAG_RE,
     _WEIGHT_RE,
@@ -37,6 +54,7 @@ from .dataset import (
     _CHARACTER_NAMES_LOWER,
     _character_output_name,
     _dataset_key,
+    _record_post_count,
 )
 from .textparse import (
     _is_artist_tag,
@@ -303,6 +321,15 @@ def _dataset_lookup(tag: str, mode: str = _BARE_NAME_MODE_EXACT) -> tuple[dict |
     if not _CHARACTER_NAMES_LOWER:
         return None, None
 
+    # 通用词屏蔽表：即使数据集里存在同名角色（bow_(paper_mario)、elf_(dragon's_crown)），
+    # 裸名也不允许命中。必须放在精确匹配之前——原实现只在模糊分支查停用词，
+    # 精确路径完全绕过，通用 tag 因此被当成角色。
+    # _dataset_lookup 也被 _character_bare_name 这条旧 API 复用，放在这里可保证新旧
+    # 两条识别路径行为一致。显式写法走 _character_name_from_tag，不经过本函数，
+    # 所以 char:bow / "bow (series)" 不受影响。
+    if key in _BARE_NAME_EXACT_BLOCKLIST:
+        return None, None
+
     # --- 1) 精确匹配（第三轮要求：模糊匹配之前必须先做一次精确匹配）---
     index = _dataset_mod._CHARACTER_INDEX
     record = index.get(key)
@@ -430,47 +457,454 @@ def _character_bare_name(tag: str, mode: str) -> str | None:
     return _resolve_character_name(tag, mode)
 
 
+def _iter_tokens(texts):
+    """把多段文本分词一次，供后续各阶段复用（性能：原实现每轮重新 split）。"""
+    return [(text, list(_iter_tags(text))) for text in texts]
+
+
+def _as_tokenised(texts_or_tokens):
+    """接受「原始文本序列」或「已分词结果」，统一返回已分词结果。"""
+    if texts_or_tokens and isinstance(texts_or_tokens[0], tuple):
+        return texts_or_tokens
+    return _iter_tokens(texts_or_tokens)
+
+
+# ---------------------------------------------------------------------------
+# 候选角色（Candidate）：收集 → 评分 → 过滤 → 裁决 → 规范化 → 去重
+#
+# 设计要点（对应「角色识别鲁棒性」方案）：
+#   * 显式写法（char:xxx / xxx (series)）是强证据，永不被通用词过滤掉；
+#   * 裸名是弱证据，必须自己证明自己：先过通用词屏蔽表，再看热度与上下文；
+#   * 弱证据不能覆盖强证据：例如 "professor_niyaniya (blue archive)" + "bow"
+#     不能产出 bow_professor_niyaniya_(blue_archive)。
+# ---------------------------------------------------------------------------
+
+# 候选来源标识（内部使用，不对外暴露）
+_SRC_EXPLICIT_CHAR = "explicit_char"
+_SRC_EXPLICIT_SERIES = "explicit_series"
+_SRC_DATASET_EXACT = "dataset_exact"
+_SRC_DATASET_ALIAS = "dataset_alias"
+_SRC_DATASET_FUZZY = "dataset_fuzzy"
+
+_SOURCE_SCORES = {
+    _SRC_EXPLICIT_CHAR: _SCORE_EXPLICIT_CHAR,
+    _SRC_EXPLICIT_SERIES: _SCORE_EXPLICIT_SERIES,
+    _SRC_DATASET_EXACT: _SCORE_DATASET_EXACT,
+    _SRC_DATASET_ALIAS: _SCORE_DATASET_ALIAS,
+    _SRC_DATASET_FUZZY: _SCORE_DATASET_FUZZY,
+}
+
+
+@dataclass
+class CharacterCandidate:
+    """一个角色候选：名字 + 证据来源 + 数据集元数据 + 评分。"""
+
+    name: str
+    source: str
+    source_tag: str | None = None
+    canonical: str | None = None          # 数据集里的规范写法（用于规范化与去重）
+    copyright: str | None = None
+    post_count: int = 0
+    is_generic: bool = False
+    score: int = 0
+    order: int = 0                        # 首次出现顺序，保证输出稳定
+
+
+@dataclass
+class _CharacterContext:
+    """提示词级上下文：从显式角色里抽出的作品名（copyright）。"""
+
+    copyrights: set[str] = field(default_factory=set)
+
+
+def _post_count_score(posts: int) -> int:
+    """热度加分（辅助证据，绝不作为「是不是角色」的判据）。"""
+    if posts >= 10000:
+        return _SCORE_POST_10000
+    if posts >= 1000:
+        return _SCORE_POST_1000
+    if posts >= 100:
+        return _SCORE_POST_100
+    return 0
+
+
+def _score_character_candidate(candidate: CharacterCandidate, context: _CharacterContext) -> int:
+    """按来源 / 热度 / 通用词 / 上下文一致性给候选打分。"""
+    score = _SOURCE_SCORES.get(candidate.source, 0)
+    score += _post_count_score(candidate.post_count)
+    if candidate.is_generic:
+        score += _SCORE_GENERIC_PENALTY
+    own = _dataset_key(candidate.copyright or "")
+    if own and context.copyrights:
+        if own in context.copyrights:
+            score += _SCORE_SAME_COPYRIGHT
+        else:
+            score += _SCORE_OTHER_COPYRIGHT
+    # 模糊命中额外要求「打字完整度」：tag 越接近完整角色名越可信。
+    # "kita ikuy"（9/10 个字) 远比 "elf" 这种只写了前几个词的猜测可信。
+    if candidate.source == _SRC_DATASET_FUZZY and candidate.source_tag:
+        typed = _dataset_key(candidate.source_tag)
+        # 基准用候选自身的名字（被命中的角色键）；canonical 带作品名后缀，
+        # 会让覆盖度被无故压低。
+        basis = _dataset_key(candidate.name)
+        if basis:
+            coverage = min(len(typed) / len(basis), 1.0)
+            if coverage < _FUZZY_MIN_COVERAGE:
+                return score - 1000          # 覆盖度过低：直接不接受
+            score += int(coverage * _SCORE_FUZZY_COVERAGE)
+    return score
+
+
+def _accept_candidate(candidate: CharacterCandidate) -> bool:
+    """按来源分别设定接受门槛：显式写法直接通过，弱证据需要更高分。"""
+    if candidate.source in (_SRC_EXPLICIT_CHAR, _SRC_EXPLICIT_SERIES):
+        return True
+    if candidate.source == _SRC_DATASET_FUZZY:
+        return candidate.score >= _ACCEPT_THRESHOLD_FUZZY
+    return candidate.score >= _ACCEPT_THRESHOLD_EXACT
+
+
+def _collect_explicit_candidates(texts) -> list[CharacterCandidate]:
+    """第一轮：显式写法（char:xxx 与 name (series)）。强证据，不过通用词过滤。"""
+    collected: list[CharacterCandidate] = []
+    order = 0
+    for _text, tags in _as_tokenised(texts):
+        for tag in tags:
+            name = _character_name_from_tag(tag)
+            if not name:
+                continue
+            collected.append(CharacterCandidate(
+                name=name, source=_SRC_EXPLICIT_SERIES,
+                source_tag=tag, order=order))
+            order += 1
+    return collected
+
+
+def _series_copyrights(texts) -> set[str]:
+    """从 "name (series)" 写法里抽出 series，作为提示词上下文（作品名）。
+
+    这样 "miku (vocaloid)" 里的 vocaloid 会成为上下文，帮助裸名候选选中同作品角色
+    （实测：裸键 "miku" 指向 darling_in_the_franxx，而未带上下文的评分会接受它）。
+    """
+    found: set[str] = set()
+    for _text, tags in _as_tokenised(texts):
+        for tag in tags:
+            text = _series_name_text(tag)
+            if not text:
+                continue
+            match = _SERIES_NAME_TAG_RE.match(text)
+            if not match:
+                continue
+            series = _WEIGHT_RE.sub("", match.group("series")).strip()
+            key = _dataset_key(series)
+            if key and not _NUMBER_RE.match(series):
+                found.add(key)
+    return found
+
+
+def _build_character_context(explicit: list[CharacterCandidate],
+                             texts=None) -> _CharacterContext:
+    """由显式角色（以及可选的原文本）构建上下文。"""
+    context = _CharacterContext()
+    for candidate in explicit:
+        key = _dataset_key(candidate.copyright or "")
+        if key:
+            context.copyrights.add(key)
+    if texts is not None:
+        context.copyrights |= _series_copyrights(texts)
+    return context
+
+
+def _apply_series_guard(candidates: list[CharacterCandidate]) -> list[CharacterCandidate]:
+    """显式 "name (series)" 的作品名必须与数据集一致，否则丢弃该候选。
+
+    数据集里可能存在同名但属于别的作品的角色，例如裸键 "miku" 指向
+    miku_(darling_in_the_franxx)。若提示词写的是 "miku (vocaloid)"，旧实现会
+    回退到基础名从而张冠李戴；这里改为：作品名对不上就不产出角色。
+    """
+    kept: list[CharacterCandidate] = []
+    for candidate in candidates:
+        text = _series_name_text(candidate.source_tag or "")
+        match = _SERIES_NAME_TAG_RE.match(text) if text else None
+        if not match:
+            kept.append(candidate)
+            continue
+        series_key = _dataset_key(_WEIGHT_RE.sub("", match.group("series")).strip())
+        rec = _dataset_ref_for_name(candidate.name)
+        record_cp = _dataset_key((rec or {}).get("copyright") or "")
+        if series_key and record_cp and series_key != record_cp:
+            continue
+        kept.append(candidate)
+    return kept
+
+
+def _dataset_ref_for_name(name: str) -> dict | None:
+    """按输出名精确反查数据集记录（取 copyright / 热度 / canonical）。
+
+    只做精确键匹配，**不做去后缀的基础名回退**：显式写法 "a (series one)" 若
+    回退成基础名 "a"，会撞上完全无关的角色记录（真实数据集里 "a" 指向
+    a_(xenoblade)），从而污染上下文与作品名一致性检查。
+    """
+    return _dataset_mod._CHARACTER_INDEX.get(_dataset_key(name))
+
+
+def _fill_candidate_dataset_meta(candidate: CharacterCandidate) -> None:
+    """补上 copyrigh / 热度 / 规范写法（显式候选用于上下文与规范化）。"""
+    record = _dataset_ref_for_name(candidate.name)
+    if record is None:
+        return
+    candidate.copyright = record.get("copyright") or ""
+    candidate.post_count = _record_post_count(record)
+    # canonical 只在为空时填：显式候选的 canonical 就是它输出的 "name (series)"，
+    # 若在这里覆盖成 _character_output_name()（可能带上作品名后缀），会打乱去重键，
+    # 也会污染 _build_character_context 抽出的上下文。
+    if not candidate.canonical:
+        candidate.canonical = _character_output_name(record) or candidate.name
+
+
+def _is_native_name_for_key(record_name: str, key: str) -> bool:
+    """记录的「裸键」是否代表上游真有一条叫这个名字的记录。
+
+    用于把「原生单字角色」（frieren / kita_ikuyo / hatsune_miku）与
+    「从 单词_(作品名) 派生出来的幻影键」（bow_(paper_mario) -> "bow"）区分开：
+    后者与提示词里的普通英文 tag 逐字相同，必须排除在裸名识别之外。
+
+    判据基于记录的真实名字（不是归一化键）：把 `name_(series)` 拆成
+    「名字 + 括号部分」。只有当括号前部分是**单个词**、且它不等于整条名字时，
+    这个裸键才是「括号后作品的派生品」，需要排除。
+    这样 bow_(paper_mario) -> "bow" 被排除，而
+    rem_(re:zero) -> "rem"、rio_(blue_archive) -> "rio" 这类「不带作品名的
+    规范短名」仍然可用（它们是数据集对同一角色的另一种等价写法）。
+    """
+    raw = (record_name or "").strip()
+    if not raw or "(" not in raw:
+        return True
+    head = raw.split("(", 1)[0].rstrip("_ ").strip()
+    head_key = head.lower().replace("_", " ").strip()
+    if not head_key or " " in head_key:
+        return True
+    return head_key == _dataset_key(raw)
+
+
+# 派生裸键的「压倒性胜出」判据：最高热度至少是次高的这么多倍，且自身不低于下限。
+# 数据校准：rem 10255 vs 160（64x）通过；miku 220 vs 157（1.4x）不通过。
+_HEAD_DOMINANCE_RATIO = 3
+_HEAD_DOMINANCE_MIN_POSTS = 500
+
+
+def _dominant_head_record(key: str) -> dict | None:
+    """在「同一个角色短名」的多个记录里挑出压倒性胜出者，歧义时返回 None。
+
+    只处理单词键。候选 = 记录名去掉括号后恰好等于该键的记录，
+    例如 key="rem" 时匹配 rem_(re:zero) / rem_(death_note)。
+    """
+    index = _dataset_mod._CHARACTER_INDEX
+    matches: list[dict] = []
+    seen_ids: set[int] = set()
+    for index_key, record in index.items():
+        if _DISAMBIG_SUFFIX_RE.sub("", index_key).strip() != key:
+            continue
+        marker = id(record)
+        if marker in seen_ids:
+            continue
+        seen_ids.add(marker)
+        matches.append(record)
+    if not matches:
+        return None
+    matches.sort(key=_record_post_count, reverse=True)
+    top = _record_post_count(matches[0])
+    second = _record_post_count(matches[1]) if len(matches) > 1 else 0
+    if top < _HEAD_DOMINANCE_MIN_POSTS:
+        return None
+    if second and top < second * _HEAD_DOMINANCE_RATIO:
+        return None
+    return matches[0]
+
+
+def _aliased_records(key: str) -> list[tuple[str, dict]]:
+    """复合名别名候选：(索引键, 记录)，按热度降序。"""
+    out: list[tuple[str, dict]] = []
+    index = _dataset_mod._CHARACTER_INDEX
+    for alias_key in _dataset_mod._CHARACTER_ALIASES.get(key, ()):
+        record = index.get(alias_key)
+        if record is not None:
+            out.append((alias_key, record))
+    out.sort(key=lambda item: -_record_post_count(item[1]))
+    return out
+
+
+def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
+    """裸名 tag -> 候选：通用词屏蔽 → 精确 → 别名 → 模糊。
+
+    返回 None 表示「不构成角色候选」。多角色的选择由调用方结合上下文裁决。
+    """
+    stripped = _strip_weights(tag)
+    if not stripped or _is_artist_tag(stripped):
+        return None
+    key = _dataset_key(stripped)
+    if not key or key.isdigit() or not _CHARACTER_NAMES_LOWER:
+        return None
+    # 通用词屏蔽：即使数据集里有同名角色也不允许裸名命中（显式写法不受影响）
+    if key in _BARE_NAME_EXACT_BLOCKLIST:
+        return None
+
+    index = _dataset_mod._CHARACTER_INDEX
+
+    def _make(record: dict, source: str, display: str) -> CharacterCandidate:
+        # 输出用「短名」：与旧的 _dataset_short_name 行为一致（rem 而不是
+        # rem_(re:zero)、frieren 而不是 frieren (sousou_no_frieren)）。
+        # canonical 保留数据集规范写法，供上下文与去重使用。
+        name = _dataset_short_name(record.get("name") or display, record) \
+            or _sanitize_name(display) or display
+        candidate = CharacterCandidate(
+            name=name, source=source, source_tag=tag, canonical=record.get("name"))
+        _fill_candidate_dataset_meta(candidate)
+        return candidate
+
+    # 结构收紧：单词派生键 = 数据集里的 "单词_(作品名)" 被派生成裸键，与普通英文
+    # tag 无法区分（bow_(paper_mario) -> "bow"、elf_(dragon's_crown) -> "elf"）。
+    # 判据（用记录的真实名字，而不是归一化键，避免 strip 掉括号后误判为原生）：
+    #   名字的「括号前部分」是单词、且这个单词本身不是整条名字 => 该裸键是派生的。
+    # 派生键只有在「同前缀候选里有一个压倒性胜出」时才允许继续，
+    # 否则它就是歧义通用词，退回普通 tag 语义：
+    #   rem_(re:zero) 10255 vs rem_(death_note) 160  -> 压倒性，识别 rem
+    #   miku_(darling_in_the_franxx) 220 vs miku_(lee) 157 -> 歧义，不识别 miku
+    record = index.get(key)
+    if record is not None:
+        if not _is_native_name_for_key(record.get("name") or "", key):
+            dominant = _dominant_head_record(key)
+            if dominant is None:
+                return None
+            record = dominant
+        # 1) 精确命中：原生裸名（frieren / kita ikuyo）以及名字本身就是该词的记录
+        return _make(record, _SRC_DATASET_EXACT, stripped)
+
+    # 2) 去 "_(版本名)" 后缀的基础名：只接受**多词**基础名，避免
+    #    「单词_(作品名)」经由基础名路径泄漏成通用词角色。
+    base = _DISAMBIG_SUFFIX_RE.sub("", key).strip()
+    if base and base != key and " " in base:
+        record = index.get(base)
+        if record is not None:
+            return _make(record, _SRC_DATASET_EXACT, stripped)
+
+    # 3) 复合名别名（如 remilia -> remilia_scarlet）：取热度最高者作为默认。
+    #    单字也允许：别名只来自数据集的**复合名**（remilia_scarlet），
+    #    不会像派生键那样与通用英文词重合。
+    aliases = _aliased_records(key)
+    if aliases:
+        _alias_key, record = aliases[0]
+        # 别名同样要有质量下限：只凭「唯一候选」就认别名会把普通 tag 拉进来
+        # （实测 guitar -> guitar_little_sister，仅 115 热度，却让 "guitar" 变角色）。
+        if _record_post_count(record) >= _HEAD_DOMINANCE_MIN_POSTS:
+            return _make(record, _SRC_DATASET_ALIAS, stripped)
+
+    # 4) 模糊匹配（最弱证据）：只对**多词** tag 生效。
+    #    单词 tag 的容错空间太大（elf -> elf_(dragon's_crown)、stage -> sage），
+    #    而所有原生单字角色都已由上面的精确/别名路径覆盖，因此单词 tag 到此为止。
+    if " " not in key:
+        return None
+
+    matched = _fuzzy_candidate_matches(key, mode)
+    if matched is None:
+        return None
+    record = index.get(matched)
+    if record is None:
+        return None
+    # 模糊命中：输出**数据集里的规范短名**（kita ikuy -> kita_ikuyo），
+    # 而不是用户拼错的原文，避免同一个角色因拼写差异落到两个目录。
+    return _make(record, _SRC_DATASET_FUZZY, stripped)
+
+
+def _collect_bare_candidates(texts, bare_mode: str) -> list[CharacterCandidate]:
+    """第二轮：裸名候选（弱证据，需要自己证明自己）。"""
+    if bare_mode == _BARE_NAME_MODE_OFF:
+        return []
+    collected: list[CharacterCandidate] = []
+    order = 0
+    for _text, tags in _as_tokenised(texts):
+        for tag in tags:
+            stripped = _strip_weights(tag)
+            # 元标签（"kita_ikuyo (cosplay)"）先剥壳，只匹配括号前的裸名字
+            meta_name, _meta = _meta_series_name(stripped)
+            probe = meta_name or stripped
+            if not meta_name and _series_name_text(stripped):
+                continue  # 已是 "name (series)"，归第一轮管
+            candidate = _lookup_bare_candidate(probe, bare_mode)
+            if candidate is None:
+                continue
+            candidate.order = order
+            order += 1
+            collected.append(candidate)
+    return collected
+
+
+def _select_character_candidates(candidates: list[CharacterCandidate],
+                                 context: _CharacterContext) -> list[CharacterCandidate]:
+    """评分 → 过滤 → 裁决 → 去重，返回按首次出现顺序排列的最终候选。"""
+    for candidate in candidates:
+        candidate.score = _score_character_candidate(candidate, context)
+    accepted = [c for c in candidates if _accept_candidate(c)]
+
+    # 规范化去重：同一个规范名只保留最高分（并列时保留先出现的）
+    best: dict[str, CharacterCandidate] = {}
+    order: dict[str, int] = {}
+    for candidate in accepted:
+        canonical = candidate.canonical or candidate.name
+        key = _dataset_key(canonical)
+        if not key:
+            continue
+        current = best.get(key)
+        if current is None or candidate.score > current.score:
+            best[key] = candidate
+            order[key] = candidate.order
+    return sorted(best.values(), key=lambda c: order[_dataset_key(c.canonical or c.name)])
+
+
 def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF):
     """Character names guessed from "name (series)" tags, artist tags skipped.
 
-    三轮，先命中先用（重复候选只保留第一次，保证顺序稳定）：
-    1. 每个 tag 的原有 "name (series)" 提取。注意 `<name> (cosplay)` 这类元标签
-       由 _character_name_from_tag 的元标签分支处理，不会把 cosplay 写成作品名；
-    2. bare_mode 打开时：数据集精确 / 模糊匹配纯名字 tag（第一轮没命中的 tag 才走到）；
-    3. 原有回退扫描 _SERIES_NAME_RE（处理非逗号分隔的整段文本）。
+    重构后为「收集 → 评分 → 过滤 → 裁决 → 规范化 → 去重」五个阶段：
+    1. 收集显式候选（char: / name (series)）——强证据；
+    2. 收集裸名候选（数据集精确 / 别名 / 模糊）——弱证据；
+    3. 用显式角色与 "name (series)" 抽出作品名上下文；
+    4. 评分后裁决：弱证据必须自己达到门槛，且显式作品名对不上就丢弃；
+    5. 规范化去重，最后再做一轮「非逗号分隔整段文本」的回退扫描。
 
-    这里收集**所有**候选，不再有 max_tags 截断（第三轮改为自动检测角色数量）。
-
-    性能：每段文本只分词一次（原实现三轮各自重新 split 一次），三轮复用同一份
-    tag 列表；顺序与去重语义与原来完全一致。
+    输出仍是角色名字符串序列（对外 API 不变），顺序沿用首次出现顺序。
     """
-    seen = set()
+    tokenised = _iter_tokens(texts)
 
-    def _emit(candidate):
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            return candidate
-        return None
+    explicit = _collect_explicit_candidates(texts)
+    for candidate in explicit:
+        _fill_candidate_dataset_meta(candidate)
+    context = _build_character_context(explicit, tokenised)
+    explicit = _apply_series_guard(explicit)
 
-    tokenised = [(text, list(_iter_tags(text))) for text in texts]
+    bare = _collect_bare_candidates(texts, bare_mode)
 
-    for _text, tags in tokenised:
-        for tag in tags:
-            candidate = _emit(_character_name_from_tag(tag))
-            if candidate:
-                yield candidate
+    selected = _select_character_candidates(explicit, context)
+    selected += [c for c in _select_character_candidates(bare, context)
+                 if _dataset_key(c.canonical or c.name)
+                 not in {_dataset_key(s.canonical or s.name) for s in selected}]
 
-    if bare_mode != _BARE_NAME_MODE_OFF:
-        for _text, tags in tokenised:
-            for tag in tags:
-                candidate = _emit(_character_bare_name(tag, bare_mode))
-                if candidate:
-                    yield candidate
+    seen: set[str] = set()
+    for candidate in selected:
+        # 输出候选自身的名字（显式写法保留 "name (series)"，裸名用短名），
+        # canonical 只用于去重与上下文，不参与输出。
+        key = _dataset_key(candidate.canonical or candidate.name)
+        if key and key not in seen and candidate.name not in seen:
+            seen.add(key)
+            seen.add(candidate.name)
+            yield candidate.name
 
-    # fallback for texts whose tags are not comma separated
+    # 非逗号分隔整段文本的回退扫描
     for _text, tags in tokenised:
         cleaned = ", ".join(t for t in tags if not _is_artist_tag(_unescape_tag(t)))
         for match in _SERIES_NAME_RE.finditer(cleaned):
-            candidate = _emit(_character_name_from_tag(match.group(0)))
-            if candidate:
-                yield candidate
+            name = _character_name_from_tag(match.group(0))
+            if not name:
+                continue
+            key = _dataset_key(name)
+            if key and key not in seen:
+                seen.add(key)
+                yield name

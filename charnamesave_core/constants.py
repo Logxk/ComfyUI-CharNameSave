@@ -42,11 +42,12 @@ _BARE_NAME_MIN_LEN = 4
 _FUZZY_CUTOFF = 0.92
 # 模糊匹配的长度容差：候选角色名与 tag 的长度差超过这个值就不算匹配
 _FUZZY_MAX_LEN_DIFF = 1
-# 通用 tag / 场景词停用表：这些词**永不参与模糊匹配**（精确匹配仍然有效）。
+# 通用 tag / 场景词停用表：这些词**永不参与模糊匹配**。
 # 第三轮修复的核心之一：stage、live house、guitar 之类的词与角色名形近，
 # 例如 "stage" -> "sage"（相似度 8/9 ≈ 0.888）。
 # 表里统一用 _dataset_key 归一化后的写法（小写 + 下划线转空格）。
-_BARE_NAME_STOPWORDS = frozenset({
+# 别名 _FUZZY_STOPWORDS：它们是同一份数据，只是名字点明了它的作用域——只挡模糊匹配。
+_FUZZY_STOPWORDS = frozenset({
     # 与测试提示词相关的场景/动作词（第三轮触发案例）
     "stage", "stage lights", "live house", "livehouse", "guitar",
     "playing guitar", "playing guitar together", "singing", "smiling",
@@ -74,6 +75,106 @@ _BARE_NAME_STOPWORDS = frozenset({
     "very aesthetic", "official art", "anime style", "photorealistic",
     "artist name", "watermark", "signature", "english text", "japanese text",
 })
+# 兼容别名：历史代码/测试引用 _BARE_NAME_STOPWORDS，语义等同 _FUZZY_STOPWORDS。
+_BARE_NAME_STOPWORDS = _FUZZY_STOPWORDS
+
+# --- 裸名精确匹配屏蔽表（_BARE_NAME_EXACT_BLOCKLIST）------------------------------
+# 与 _FUZZY_STOPWORDS 的区别：这些词即使命中了数据集的精确匹配，也**不允许**当作
+# 裸名角色。理由见下面的实测结论。
+#
+# 为什么需要单独一层：
+#   数据集里存在大量「普通英文词恰好也是某角色 tag」的条目，例如
+#     bow      -> bow_(paper_mario)          (posts 146)
+#     professor-> professor_(ragnarok_online) (posts 753)
+#     ribbon   -> ribbon_(kirby)             (posts 660)
+#   提示词里的 `bow` / `ribbon` 是服装与构图 tag，被精确命中后会被当成角色，
+#   于是「单一角色」的提示词凑成双人并落进 Duo 分组
+#   （实测：professor_niyaniya (blue archive) + bow -> Duo_bow_professor_niyaniya…）。
+#
+# 为什么不能只靠 post_count：这些条目与真角色完全重叠——
+#   doctor_(arknights) 12943 / professor_(ragnarok_online) 753 / bow_(paper_mario) 146，
+#   而真角色热度只要有 100 就可以很低，不存在可分阈值。
+#
+# 为什么不能只靠「删除派生键」：派生出的单词裸键里包含高频真角色
+#   （sensei 39183 / lumine 22083 / saber 21195 / rem 10255），一刀切会误伤。
+#
+# 因此这是一层**便宜的、可解释的**词表防线，只覆盖「明显是普通描述词」的词；
+# 真正的裁决交给上下文与评分（见 matching.py 的候选评分）。显式写法
+# （"bow (some series)" 或 char:bow）**不受本表影响**。
+_BARE_NAME_EXACT_BLOCKLIST = frozenset({
+    # 服装
+    "shirt", "skirt", "dress", "pants", "shoes", "socks", "stockings",
+    "pantyhose", "bra", "panties", "gloves", "scarf", "cape", "coat",
+    "sweater", "hoodie", "shorts", "swimsuit", "bikini", "uniform",
+    # 配饰
+    "bow", "ribbon", "tie", "hat", "glasses", "necklace", "earrings",
+    "bracelet", "crown", "veil", "headband", "hairband", "halo", "halos",
+    # 身份 / 职业（同时也是普通名词，实测会被数据集的同名角色命中）
+    "professor", "teacher", "student", "doctor", "nurse", "police",
+    "officer", "soldier", "knight", "prince", "princess", "king", "queen",
+    "master", "servant", "hero", "angel", "devil", "demon", "god", "goddess",
+    "witch", "wizard", "priest", "nun", "maid", "butler", "idol", "singer",
+    "dancer", "writer", "scientist", "engineer", "manager",
+    # 种族 / 奇幻生物（同样是通用 tag，数据集里常有同名角色）
+    "elf", "elves", "dwarf", "dwarves", "orc", "goblin", "slime", "fairy",
+    "giant", "ghost", "zombie", "vampire", "werewolf", "mermaid", "centaur",
+    "alien", "robot", "android", "human", "person", "child", "baby", "adult",
+    # 动物 / 元素（同样是通用 tag，数据集里常有同名角色）
+    "fox", "cat", "dog", "wolf", "bear", "bird", "fish", "horse", "dragon",
+    "snake", "rabbit", "tiger", "lion", "monkey", "sheep", "cow", "pig",
+    "deer", "frog", "bee", "spider", "star", "moon", "sun", "rose", "apple",
+    "leaf", "tree", "flower",
+    # 身体
+    "hair", "eyes", "eye", "face", "head", "hand", "hands", "arm", "arms",
+    "leg", "legs", "feet", "foot", "thigh", "thighs", "breasts", "skin",
+    "mouth", "nose", "ear", "ears", "tail", "wings", "horn", "horns",
+    # 物件
+    "chair", "table", "window", "door", "book", "pen", "cup", "glass",
+    "bottle", "sword", "knife", "gun", "box", "bag", "phone", "clock",
+    # 场景
+    "office", "classroom", "indoors", "outdoors", "room", "kitchen",
+    "bedroom", "street", "garden", "forest", "mountain", "ocean",
+    "sky", "cloud", "clouds", "rain", "snow", "wind", "fire", "water",
+    # 通用描述词（_original 记录里的「无名」条目，名字本身就是描述）
+    "girl", "boy", "fox girl", "fox girls", "cat girl", "cat girls",
+    "bunny girl", "bunny girls", "mouse girl", "blonde girl", "blonde dog girl",
+    "ahoge girl", "angel girl", "receptionist girl", "thai girl",
+    "old man", "white-haired man", "gunpla boy",
+})
+
+# --- 候选评分常量（内部排序依据，不对外暴露、不作为 API 行为）----------------------
+# 证据等级：显式写法永远最高；模糊匹配是最弱的一级（方案 §5/§17）。
+_SCORE_EXPLICIT_CHAR = 100        # char:xxx
+_SCORE_EXPLICIT_SERIES = 100      # xxx (series) / xxx_(series)
+_SCORE_DATASET_EXACT = 55         # 裸名精确命中数据集
+_SCORE_DATASET_ALIAS = 50         # 命中派生别名（如 remilia -> remilia_scarlet）
+_SCORE_DATASET_FUZZY = 25         # 模糊匹配
+
+# 热度是**辅助证据**，不是「是不是角色」的判据（避免误杀新作品角色）
+_SCORE_POST_10000 = 20
+_SCORE_POST_1000 = 10
+_SCORE_POST_100 = 5
+
+# 上下文一致 / 冲突
+_SCORE_SAME_COPYRIGHT = 20        # 与提示词里显式角色的作品名一致
+_SCORE_OTHER_COPYRIGHT = -10      # 属于另一个已知作品
+
+# 通用词惩罚：足够大，使「裸名 + 通用词」的候选无法达到接受线
+_SCORE_GENERIC_PENALTY = -80
+
+# 接受阈值：不同来源用不同门槛（弱证据需要更高分）
+_ACCEPT_THRESHOLD_EXACT = 50
+_ACCEPT_THRESHOLD_FUZZY = 45
+
+# 模糊命中的「打字完整度」加成与下限：
+# coverage = len(tag) / len(规范名)，越高说明用户写得越完整。
+# 已校准的用例：
+#   "kita ikuy" -> "kita ikuyo"                9/10  = 0.90 -> 25+10+36 = 71 接受
+#   "hakurei reim" -> "hakurei reimu"         12/13  = 0.92
+#   "denia" -> "denia (wuthering waves)"       5/24  = 0.21 -> 低于下限，不接受
+_FUZZY_MIN_COVERAGE = 0.55
+_SCORE_FUZZY_COVERAGE = 40
+
 # 尾部 "_xxx)" 或 " xxx)" 后缀：danbooru 用来消歧的 costume/版本名
 _DISAMBIG_SUFFIX_RE = re.compile(r"[_\s]\(([^()]*)\)$")
 # 数据集里 `name` 本身是否已带 "_(xxx)" 后缀（danbooru 常见消歧写法）

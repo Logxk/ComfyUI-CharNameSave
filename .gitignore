@@ -22,3 +22,6 @@ tests/_tmp_download/
 data/characters.jsonl.meta
 .hf_cache/
 .hfcache/
+
+# 本地评审用的候选方案 diff（不属于插件内容）
+review/
