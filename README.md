@@ -139,6 +139,29 @@ python download_dataset.py --from-file <下载到的 characters.jsonl>
 > 确定性择优，不依赖集合遍历顺序，因此不受 Python 哈希随机化影响，重启 ComfyUI
 > 或换一台机器都不会把同一张图存进不同目录。
 
+#### 显式写法优先（重要）
+
+**只要提示词里出现任何显式角色写法，就不再执行裸名判定。** 显式写法指：
+
+```
+char:hakurei_reimu          char: 标记
+hikari (blue archive)       name (series)
+hikari \(blue_archive\)     转义括号写法
+```
+
+所以下面这条提示词只会得到 `hikari_(blue_archive)`：
+
+```
+hikari (blue archive), blue archive, 1girl, black hat, halo, black jacket
+```
+
+`black hat` 之类的服装 tag 不会被拿去数据集里找同名角色——数据集里确实存在
+`black_hat_(villainous)`，旧行为会把单人提示词凑成 `Duo`。
+
+> **代价（有意设计）**：混写时裸名一律不认。例如 `char:hikari, rem` 只会得到
+> `hikari`，`rem` 需要写成 `char:rem` 或 `rem (re:zero)`。整条提示词都不带显式
+> 写法时（如 `emilia, rem, frieren`），裸名识别照常工作。
+
 #### 什么会被拒绝，以及为什么
 
 角色识别按「证据强弱」分层，弱证据必须自己证明自己：

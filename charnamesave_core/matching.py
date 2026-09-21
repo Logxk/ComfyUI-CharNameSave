@@ -14,6 +14,7 @@ from functools import lru_cache
 from . import dataset as _dataset_mod
 from .constants import (
     _ARTIST_IN_NAME_RE,
+    _CHAR_TAG_RE,
     _ACCEPT_THRESHOLD_EXACT,
     _ACCEPT_THRESHOLD_FUZZY,
     _BARE_NAME_EXACT_BLOCKLIST,
@@ -581,6 +582,19 @@ def _collect_explicit_candidates(texts) -> list[CharacterCandidate]:
     return collected
 
 
+def _has_char_marker(texts) -> bool:
+    """提示词里是否出现 char: 显式标记（与 "name (series)" 同属显式写法）。
+
+    _char_names 会优先采用 char: 并在命中时直接返回，但 _auto_candidates 也必须
+    知道「存在显式写法」才能抑制裸名判定，否则直接调用它时规则不生效。
+    """
+    for _text, tags in _as_tokenised(texts):
+        for tag in tags:
+            if _CHAR_TAG_RE.search(_unescape_tag(tag)):
+                return True
+    return False
+
+
 def _series_copyrights(texts) -> set[str]:
     """从 "name (series)" 写法里抽出 series，作为提示词上下文（作品名）。
 
@@ -816,9 +830,25 @@ def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
     return _make(record, _SRC_DATASET_FUZZY, stripped)
 
 
-def _collect_bare_candidates(texts, bare_mode: str) -> list[CharacterCandidate]:
-    """第二轮：裸名候选（弱证据，需要自己证明自己）。"""
+def _collect_bare_candidates(texts, bare_mode: str,
+                             has_explicit: bool = False) -> list[CharacterCandidate]:
+    """第二轮：裸名候选（弱证据，需要自己证明自己）。
+
+    显式优先规则：只要提示词里出现**任何显式角色写法**（`char:xxx`、
+    `name (series)`、`name \\(series\\)`），就完全不再做裸名判定。
+
+    理由：显式写法已经明确了「这一张画的是谁」，此时提示词里剩下的裸词几乎都是
+    服装 / 构图 / 场景 tag。而数据集里存在大量「普通 tag 恰好也是角色名」的条目
+    （black_hat_(villainous)、bow_(paper_mario)…），继续跑裸名判定只会把它们
+    当成第二个角色，把单人提示词凑成 Duo。
+
+    代价（有意为之）：混写时裸名一律不认。例如
+    `char:hikari, rem` 只会得到 hikari，rem 需要写成 `char:rem` 或
+    `rem (re:zero)`。要恢复裸名能力，把这里改成只拦「弱候选」即可。
+    """
     if bare_mode == _BARE_NAME_MODE_OFF:
+        return []
+    if has_explicit:
         return []
     collected: list[CharacterCandidate] = []
     order = 0
@@ -881,7 +911,8 @@ def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF):
     context = _build_character_context(explicit, tokenised)
     explicit = _apply_series_guard(explicit)
 
-    bare = _collect_bare_candidates(texts, bare_mode)
+    has_explicit = bool(explicit) or _has_char_marker(texts)
+    bare = _collect_bare_candidates(texts, bare_mode, has_explicit=has_explicit)
 
     selected = _select_character_candidates(explicit, context)
     selected += [c for c in _select_character_candidates(bare, context)
