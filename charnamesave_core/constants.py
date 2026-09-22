@@ -147,12 +147,13 @@ _BARE_NAME_EXACT_BLOCKLIST = frozenset({
 })
 
 # --- 候选评分常量（内部排序依据，不对外暴露、不作为 API 行为）----------------------
-# 证据等级：显式写法永远最高；模糊匹配是最弱的一级（方案 §5/§17）。
-_SCORE_EXPLICIT_CHAR = 100        # char:xxx
-_SCORE_EXPLICIT_SERIES = 100      # xxx (series) / xxx_(series)
-_SCORE_DATASET_EXACT = 55         # 裸名精确命中数据集
-_SCORE_DATASET_ALIAS = 50         # 命中派生别名（如 remilia -> remilia_scarlet）
-_SCORE_DATASET_FUZZY = 25         # 模糊匹配
+# 证据等级（方案 §5）：显式写法永远最高；模糊匹配是最弱的一级。
+_SCORE_EXPLICIT_CHAR = 100          # char:xxx
+_SCORE_EXPLICIT_SERIES = 100        # xxx (series) / xxx_(series)
+_SCORE_DATASET_EXACT_CONTEXTUAL = 75  # 精确裸名 + 上下文支持（作品名与提示词一致）
+_SCORE_DATASET_EXACT = 55           # 裸名精确命中数据集
+_SCORE_DATASET_ALIAS = 50           # 命中派生别名（如 remilia -> remilia_scarlet）
+_SCORE_DATASET_FUZZY = 25           # 模糊匹配
 
 # 热度是**辅助证据**，不是「是不是角色」的判据（避免误杀新作品角色）
 _SCORE_POST_10000 = 20
@@ -163,12 +164,16 @@ _SCORE_POST_100 = 5
 _SCORE_SAME_COPYRIGHT = 20        # 与提示词里显式角色的作品名一致
 _SCORE_OTHER_COPYRIGHT = -10      # 属于另一个已知作品
 
-# 通用词惩罚：足够大，使「裸名 + 通用词」的候选无法达到接受线
-_SCORE_GENERIC_PENALTY = -80
+# 通用词并没有「扣分」这一步：通用 tag 在候选**生成**阶段就被
+# _is_generic_bare_tag() 直接拒绝（见 matching.py），根本进不到评分环节，
+# 因此不需要一个永远触发不了的惩罚常量。
 
-# 接受阈值：不同来源用不同门槛（弱证据需要更高分）
+# 接受阈值：不同来源用不同门槛（方案 §17：模糊匹配是弱证据，门槛要更高）。
+# 校准：'kita ikuy' -> kita_ikuyo 得分 71（25 + 热度 10 + 完整度 36），
+# 刚好越过 70；'hakurei reim' -> hakurei_reimu 得分 81。
+# 若把 fuzzy 降到 45，只写了前几个词的猜测也会被采纳，与 §17 相悖。
 _ACCEPT_THRESHOLD_EXACT = 50
-_ACCEPT_THRESHOLD_FUZZY = 45
+_ACCEPT_THRESHOLD_FUZZY = 70
 
 # 模糊命中的「打字完整度」加成与下限：
 # coverage = len(tag) / len(规范名)，越高说明用户写得越完整。
@@ -270,3 +275,16 @@ _MODES = ["按角色分组文件夹", "按角色命名文件"]
 _DEFAULT_MODE = "按角色分组文件夹"
 # legacy English values saved by earlier versions, kept for workflow compatibility
 _MODE_ALIASES = {"filename": "按角色命名文件", "folder": "按角色分组文件夹"}
+
+# --- 用户自定义 Override（方案 §35）---------------------------------------------
+# 可选文件（放在插件目录下，不进仓库），格式：
+#   {
+#     "always": ["miku", "remilia"],   # 强制按角色处理（覆盖自动判定的拒绝）
+#     "never":  ["bow", "ribbon"]      # 永不作为裸名角色（不影响显式写法）
+#   }
+# 优先级（与方案 §35 一致）：char: > always > 自动判定 > never。
+# 也就是说 `char:bow` 即使写在 never 里也照样识别（char: 是最高优先级），
+# 而 always 只抬升「裸名」判定，不会凭空造出不存在的角色名。
+# 文件路径与解析逻辑在 charnamesave_core/overrides.py（含 CHARNAMESAVE_OVERRIDES
+# 环境变量覆盖，便于测试隔离），这里不再重复定义文件名。
+

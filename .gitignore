@@ -25,3 +25,6 @@ data/characters.jsonl.meta
 
 # 本地评审用的候选方案 diff（不属于插件内容）
 review/
+
+# 用户自定义 override（本地配置，不进仓库；见 charnamesave_core/overrides.py）
+charnamesave_overrides.json

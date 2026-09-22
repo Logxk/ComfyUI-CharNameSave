@@ -7,11 +7,14 @@ keyed on the dataset version, so repeated prompts skip the O(N) similarity scan.
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
 
 from . import dataset as _dataset_mod
+from .overrides import is_always as _is_always, is_never as _is_never
 from .constants import (
     _ARTIST_IN_NAME_RE,
     _CHAR_TAG_RE,
@@ -37,12 +40,12 @@ from .constants import (
     _PLAIN_NAME_RE,
     _SCORE_DATASET_ALIAS,
     _SCORE_DATASET_EXACT,
+    _SCORE_DATASET_EXACT_CONTEXTUAL,
     _SCORE_DATASET_FUZZY,
     _SCORE_EXPLICIT_CHAR,
     _SCORE_EXPLICIT_SERIES,
     _is_generic_word_combination,
     _SCORE_FUZZY_COVERAGE,
-    _SCORE_GENERIC_PENALTY,
     _SCORE_OTHER_COPYRIGHT,
     _SCORE_POST_100,
     _SCORE_POST_1000,
@@ -66,6 +69,8 @@ from .textparse import (
     _strip_weights,
     _unescape_tag,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _character_name_from_tag(tag: str) -> str | None:
@@ -483,6 +488,7 @@ def _as_tokenised(texts_or_tokens):
 
 # 候选来源标识（内部使用，不对外暴露）
 _SRC_EXPLICIT_CHAR = "explicit_char"
+_SRC_DATASET_EXACT_CONTEXTUAL = "dataset_exact_contextual"
 _SRC_EXPLICIT_SERIES = "explicit_series"
 _SRC_DATASET_EXACT = "dataset_exact"
 _SRC_DATASET_ALIAS = "dataset_alias"
@@ -491,6 +497,7 @@ _SRC_DATASET_FUZZY = "dataset_fuzzy"
 _SOURCE_SCORES = {
     _SRC_EXPLICIT_CHAR: _SCORE_EXPLICIT_CHAR,
     _SRC_EXPLICIT_SERIES: _SCORE_EXPLICIT_SERIES,
+    _SRC_DATASET_EXACT_CONTEXTUAL: _SCORE_DATASET_EXACT_CONTEXTUAL,
     _SRC_DATASET_EXACT: _SCORE_DATASET_EXACT,
     _SRC_DATASET_ALIAS: _SCORE_DATASET_ALIAS,
     _SRC_DATASET_FUZZY: _SCORE_DATASET_FUZZY,
@@ -507,7 +514,6 @@ class CharacterCandidate:
     canonical: str | None = None          # 数据集里的规范写法（用于规范化与去重）
     copyright: str | None = None
     post_count: int = 0
-    is_generic: bool = False
     score: int = 0
     order: int = 0                        # 首次出现顺序，保证输出稳定
 
@@ -517,6 +523,50 @@ class _CharacterContext:
     """提示词级上下文：从显式角色里抽出的作品名（copyright）。"""
 
     copyrights: set[str] = field(default_factory=set)
+
+
+# --- 可选诊断输出（对应方案 §36 Logging / Debug Mode、§37 Debug 信息不要污染普通日志）---
+# 默认关闭；环境变量 CHARNAMESAVE_DEBUG 取真值（1/true/yes/on，大小写与首尾空白不敏感）
+# 时打开。每次判定现读环境变量、不做任何缓存，所以不重启进程也能开关。
+_DEBUG_ENV_VAR = "CHARNAMESAVE_DEBUG"
+_DEBUG_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _debug_enabled() -> bool:
+    """诊断输出是否打开（惰性读取环境变量；关闭时只有这一次环境变量查询）。"""
+    return os.environ.get(_DEBUG_ENV_VAR, "").strip().lower() in _DEBUG_TRUTHY
+
+
+def _log_candidate_debug(candidate: CharacterCandidate, accepted: bool) -> None:
+    """为单个角色候选打一条结构化 DEBUG 记录（仅诊断，不参与任何判定）。
+
+    目的是让误识别能直接定位到「候选生成 / 评分 / 裁决」中的哪一步：
+    source=explicit_* 却 decision=REJECT，说明候选被作品名一致性护栏
+    （_apply_series_guard）丢弃，属于候选筛选阶段，与评分无关；其余 REJECT 都是
+    评分没过 _accept_candidate 的门槛（score 即最终得分）。
+
+    关闭时提前 return：_LOGGER.debug 的整段文本与全部参数都不会被求值，
+    因此普通运行没有任何额外开销（也不改变任何输出）。
+    """
+    if not _debug_enabled():
+        return
+    _LOGGER.debug(
+        "[CharNameSave] Candidate:\n"
+        "  tag=%s\n"
+        "  source=%s\n"
+        "  dataset_name=%s\n"
+        "  post_count=%d\n"
+        "  copyright=%s\n"
+        "  score=%d\n"
+        "  decision=%s",
+        candidate.source_tag or candidate.name,
+        candidate.source,
+        candidate.canonical or candidate.name,
+        candidate.post_count,
+        candidate.copyright or "",
+        candidate.score,
+        "ACCEPT" if accepted else "REJECT",
+    )
 
 
 def _post_count_score(posts: int) -> int:
@@ -534,10 +584,13 @@ def _score_character_candidate(candidate: CharacterCandidate, context: _Characte
     """按来源 / 热度 / 通用词 / 上下文一致性给候选打分。"""
     score = _SOURCE_SCORES.get(candidate.source, 0)
     score += _post_count_score(candidate.post_count)
-    if candidate.is_generic:
-        score += _SCORE_GENERIC_PENALTY
     own = _dataset_key(candidate.copyright or "")
-    if own and context.copyrights:
+    if candidate.source == _SRC_DATASET_EXACT_CONTEXTUAL:
+        # 该证据层（75 分）本身已把「上下文一致」算进去了，再走下面的 +20 会重复
+        # 计分，所以这里只处理「属于别的作品」的扣分。
+        if own and context.copyrights and own not in context.copyrights:
+            score += _SCORE_OTHER_COPYRIGHT
+    elif own and context.copyrights:
         if own in context.copyrights:
             score += _SCORE_SAME_COPYRIGHT
         else:
@@ -648,6 +701,8 @@ def _apply_series_guard(candidates: list[CharacterCandidate]) -> list[CharacterC
         rec = _dataset_ref_for_name(candidate.name)
         record_cp = _dataset_key((rec or {}).get("copyright") or "")
         if series_key and record_cp and series_key != record_cp:
+            # 这里丢弃的候选也要有诊断记录（否则日志里看不到「候选生成过但被护栏滤掉」）
+            _log_candidate_debug(candidate, False)
             continue
         kept.append(candidate)
     return kept
@@ -675,6 +730,28 @@ def _fill_candidate_dataset_meta(candidate: CharacterCandidate) -> None:
     # 也会污染 _build_character_context 抽出的上下文。
     if not candidate.canonical:
         candidate.canonical = _character_output_name(record) or candidate.name
+
+
+def _exact_source_for(record: dict, context: _CharacterContext | None) -> str:
+    """精确裸名命中时选证据层：作品名与提示词上下文一致 -> 75 分那一层。
+
+    方案 §5 把「精确裸名 + 上下文支持」单独列为 dataset_exact_contextual(75)，
+    高于普通 dataset_exact(55)。没有上下文可比时保持 55。
+    """
+    if context is None or not context.copyrights:
+        return _SRC_DATASET_EXACT
+    own = _dataset_key((record or {}).get("copyright") or "")
+    if own and own in context.copyrights:
+        return _SRC_DATASET_EXACT_CONTEXTUAL
+    return _SRC_DATASET_EXACT
+
+
+def _is_generic_bare_tag(key: str) -> bool:
+    """裸名 key 是否属于「通用词」而不该被当作角色（方案 §30 的具名入口）。
+
+    两个判据：整词命中通用词屏蔽表，或整个名字由通用词拼成（black hat）。
+    """
+    return key in _BARE_NAME_EXACT_BLOCKLIST or _is_generic_word_combination(key)
 
 
 def _is_native_name_for_key(record_name: str, key: str) -> bool:
@@ -748,7 +825,8 @@ def _aliased_records(key: str) -> list[tuple[str, dict]]:
     return out
 
 
-def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
+def _lookup_bare_candidate(tag: str, mode: str,
+                           context: _CharacterContext | None = None) -> CharacterCandidate | None:
     """裸名 tag -> 候选：通用词屏蔽 → 精确 → 别名 → 模糊。
 
     返回 None 表示「不构成角色候选」。多角色的选择由调用方结合上下文裁决。
@@ -759,8 +837,13 @@ def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
     key = _dataset_key(stripped)
     if not key or key.isdigit() or not _CHARACTER_NAMES_LOWER:
         return None
-    # 通用词屏蔽：即使数据集里有同名角色也不允许裸名命中（显式写法不受影响）
-    if key in _BARE_NAME_EXACT_BLOCKLIST or _is_generic_word_combination(key):
+    # §35 用户 override：never = 该裸名永不识别。
+    # 显式写法不经过本函数，所以 never 不会影响 char: / "name (series)"。
+    if _is_never(key):
+        return None
+    # 通用词屏蔽：即使数据集里有同名角色也不允许裸名命中（显式写法不受影响）。
+    # 用户在 override 里明确 always 时跳过这道判定（见方案 §35 的优先级）。
+    if not _is_always(key) and _is_generic_bare_tag(key):
         return None
 
     index = _dataset_mod._CHARACTER_INDEX
@@ -789,10 +872,13 @@ def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
         if not _is_native_name_for_key(record.get("name") or "", key):
             dominant = _dominant_head_record(key)
             if dominant is None:
-                return None
-            record = dominant
+                # 歧义裸名：默认拒绝；用户 always 指定时仍采纳（方案 §35）
+                if not _is_always(key):
+                    return None
+            else:
+                record = dominant
         # 1) 精确命中：原生裸名（frieren / kita ikuyo）以及名字本身就是该词的记录
-        return _make(record, _SRC_DATASET_EXACT, stripped)
+        return _make(record, _exact_source_for(record, context), stripped)
 
     # 2) 去 "_(版本名)" 后缀的基础名：只接受**多词**基础名，避免
     #    「单词_(作品名)」经由基础名路径泄漏成通用词角色。
@@ -831,7 +917,8 @@ def _lookup_bare_candidate(tag: str, mode: str) -> CharacterCandidate | None:
 
 
 def _collect_bare_candidates(texts, bare_mode: str,
-                             has_explicit: bool = False) -> list[CharacterCandidate]:
+                             has_explicit: bool = False,
+                             context: _CharacterContext | None = None) -> list[CharacterCandidate]:
     """第二轮：裸名候选（弱证据，需要自己证明自己）。
 
     显式优先规则：只要提示词里出现**任何显式角色写法**（`char:xxx`、
@@ -849,6 +936,12 @@ def _collect_bare_candidates(texts, bare_mode: str,
     if bare_mode == _BARE_NAME_MODE_OFF:
         return []
     if has_explicit:
+        # §36：这一步也要留痕，否则「一个候选都没有」的提示词无法从日志看出
+        # 是「没有候选生成」还是「被显式写法整段抑制」。
+        if _debug_enabled():
+            _LOGGER.debug(
+                "[CharNameSave] bare-name detection skipped: "
+                "prompt contains an explicit character form (char: or \"name (series)\")")
         return []
     collected: list[CharacterCandidate] = []
     order = 0
@@ -860,7 +953,7 @@ def _collect_bare_candidates(texts, bare_mode: str,
             probe = meta_name or stripped
             if not meta_name and _series_name_text(stripped):
                 continue  # 已是 "name (series)"，归第一轮管
-            candidate = _lookup_bare_candidate(probe, bare_mode)
+            candidate = _lookup_bare_candidate(probe, bare_mode, context)
             if candidate is None:
                 continue
             candidate.order = order
@@ -874,6 +967,11 @@ def _select_character_candidates(candidates: list[CharacterCandidate],
     """评分 → 过滤 → 裁决 → 去重，返回按首次出现顺序排列的最终候选。"""
     for candidate in candidates:
         candidate.score = _score_character_candidate(candidate, context)
+    if _debug_enabled():
+        # 诊断：候选已打完分，ACCEPT/REJECT 就是最终裁决，正好定位「评分 vs 裁决」。
+        # 关闭时整个循环（含每次函数调用）都不会执行。
+        for candidate in candidates:
+            _log_candidate_debug(candidate, _accept_candidate(candidate))
     accepted = [c for c in candidates if _accept_candidate(c)]
 
     # 规范化去重：同一个规范名只保留最高分（并列时保留先出现的）
@@ -912,7 +1010,8 @@ def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF):
     explicit = _apply_series_guard(explicit)
 
     has_explicit = bool(explicit) or _has_char_marker(texts)
-    bare = _collect_bare_candidates(texts, bare_mode, has_explicit=has_explicit)
+    bare = _collect_bare_candidates(texts, bare_mode, has_explicit=has_explicit,
+                                    context=context)
 
     selected = _select_character_candidates(explicit, context)
     selected += [c for c in _select_character_candidates(bare, context)

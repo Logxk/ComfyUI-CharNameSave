@@ -200,8 +200,81 @@ char:black_hat_(villainous)  -> black_hat_(villainous)
 `kita ikuy` → `kita_ikuyo` 可识别；`denia` 不会被猜成
 `denia (wuthering waves)`，只会用你写的 `denia`。
 
+### 用户自定义 override（可选）
+
+如果自动判定与你的习惯不符，可以在**插件目录**下放一个 `charnamesave_overrides.json`
+（本地配置，不需要提交到仓库）：
+
+```json
+{
+  "always": ["miku", "remilia"],
+  "never": ["bow", "black hat"]
+}
+```
+
+| 键 | 作用 |
+| --- | --- |
+| `always` | 强制按角色处理。用来救回自动判定因**歧义**或**通用词**而拒绝的裸名，例如 `miku` |
+| `never` | 该裸名永不识别，直接退回普通 tag 语义 |
+
+优先级（与方案一致）：**`char:` > `always` > 自动判定 > `never`**。
+
+因此：
+
+```
+never: ["bow"]        char:bow 仍然识别（char: 是最高优先级，不受 never 影响）
+always: ["miku"]      裸写 miku 会被识别
+```
+
+> `always` 只影响「是否采纳这个裸名」，不会凭空造出不存在的角色——它仍然要能在
+> 数据集里查到对应记录。文件不存在 / JSON 写坏 / 字段不是字符串列表都会安全忽略
+> （只打 warning），不会影响插件运行。改完文件立即生效，无需重启。
+
 
 `(cosplay)`、`(alternate_costume)`、`(clothing_swap)`、`(crossdressing)` 等元标签不会被当成作品名；数据集查不到该角色时会退化为 `角色名_cosplay`。
+
+### 诊断输出（可选，默认关闭）
+
+遇到误识别时可以打开诊断输出，插件会为**每一个角色候选**打一条 `DEBUG` 级日志，
+直接看出是「压根没生成候选」「候选被作品名一致性护栏丢掉」还是「评分没过门槛」：
+
+```bat
+set CHARNAMESAVE_DEBUG=1
+```
+
+也可以写进系统环境变量或 ComfyUI 启动脚本；`1` / `true` / `yes` / `on` 都算打开
+（大小写、首尾空格无所谓）。该变量在**每次识别时现读**，所以改完不用重启 ComfyUI。
+
+输出形如：
+
+```text
+[CharNameSave] Candidate:
+  tag=professor_niyaniya (blue archive)
+  source=explicit_series
+  dataset_name=professor_niyaniya_(blue_archive)
+  post_count=3439
+  copyright=blue_archive
+  score=130
+  decision=ACCEPT
+```
+
+`decision` 只有 `ACCEPT` / `REJECT` 两种取值，`score` 是最终得分：
+
+- `source=explicit_*` 却 `decision=REJECT`：候选被作品名一致性护栏丢弃（例如
+  `denia (cosplay)` 里的 `cosplay`，属于候选筛选阶段，与评分无关）；
+- 其余 `REJECT`：评分没过接受门槛。
+
+> 没有 `generic` 字段：通用词是在**候选生成**阶段就被拒绝的，根本不会成为候选，
+> 因此不会出现在候选日志里。若日志里连一条候选都没有，说明问题出在生成阶段
+> （通用词表或显式写法抑制），而不是评分阶段。
+
+日志走 Python 的 `logging`（`DEBUG` 级），**默认完全静默**：不设这个环境变量时，
+普通运行既不会多出任何输出，也不会因此变慢。注意 ComfyUI 控制台默认只显示 `INFO`
+及以上，要看这些行得用 `--verbose` 启动，或自行把 `charnamesave_core.matching`
+的日志级别调到 `DEBUG`。
+
+> 说明：`char:xxx` 走的是更早的短路路径（只认显式标记、不产生候选），因此不会出现在
+> 候选日志里；候选日志覆盖的是 `name (series)` 自动提取与无作品名（裸名）识别。
 
 ### 命名规则
 
