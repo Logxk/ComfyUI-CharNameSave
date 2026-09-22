@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -115,6 +116,83 @@ def _character_name_from_tag(tag: str) -> str | None:
     if "@" in name or _ARTIST_IN_NAME_RE.search(name):
         return None
     return _sanitize_name(f"{name} ({series})")
+
+
+def _exact_dataset_tag_name(tag: str) -> str | None:
+    """tag 本身（归一化后）就是数据集键时，把它当作**显式**写法。
+
+    典型："saori (dress)" 恰好是数据集里的键（saori_(dress)_(blue_archive)），
+    但 _character_name_from_tag 只认单层括号里的**作品名**，解析不出来；
+    若不在这里认领，它会掉进裸名路径，让提示词里的 `shy` 被认成角色。
+
+    只接受**直接命中**（key 原样存在于索引）；不做「去括号基础名」回退，
+    因为那正是把 "saori (dress)" 误解析成 saori_(blue_archive) 的那条路。
+    """
+    stripped = _strip_weights(tag)
+    if not stripped or _is_artist_tag(stripped):
+        return None
+    text = _unescape_tag(stripped)
+    # 只认领**带括号**的 tag（"saori (dress)"）。判据必须这么窄：
+    #  - 单个词（shy / bow / ribbon…）属于裸名，要交给通用词屏蔽表管；
+    #  - 不带括号的多词裸名（gotoh_hitori / kita_ikuyo）也必须走裸名路径，
+    #    否则它们会被当成「显式写法」从而整段抑制裸名识别，
+    #    把 "kita ikuy, gotoh hitori" 里的 kita_ikuyo 一起挤掉。
+    if "(" not in text:
+        return None
+    key = _dataset_key(text)
+    if key not in node_index():
+        return None
+    if _is_generic_bare_tag(key):
+        return None
+    return _dataset_short_name(text, node_index()[key])
+
+
+def node_index() -> dict:
+    """数据集索引（薄封装，便于测试替换与阅读）。"""
+    return _dataset_mod._CHARACTER_INDEX
+
+
+def _qualified_character_name(tag: str) -> str | None:
+    r"""解析多层括号的限定写法：``角色 (皮肤) (作品名)``。
+
+    数据集里这类角色只有**多层括号**一种规范写法（实测 saori 有
+    saori_(blue_archive)、saori_(dress)_(blue_archive)、saori_(swimsuit)_(blue_archive)），
+    而 _character_name_from_tag 只认单层括号，于是：
+      - ``saori \(dress\) \(blue archive\)`` 解析失败 -> 落到裸名路径；
+      - 提示词里剩下的 ``shy`` 反而被认成角色，产出 shy.png。
+    这里从右往左逐层剥括号，每剥一层都拿归一化键去数据集里查：
+      ``saori (dress) (blue archive)`` -> 命中该皮肤
+      ``saori (dress)``                -> 命中同一条记录
+    一旦剥到没有括号就停止 —— **绝不回退成裸名**，否则
+    ``saori (bikini)`` 这种不存在的皮肤会被硬套成基础角色 saori，
+    与用户写的皮肤不符。逗号/斜杠分隔的多个皮肤同理，交给显式路径判断。
+    """
+    stripped = _strip_weights(tag)
+    if not stripped or _is_artist_tag(stripped):
+        return None
+    # 统一用反转义后的文本做判断，这样 "saori \(dress\)" 与 "saori (dress)" 等价
+    text = _unescape_tag(stripped).strip()
+    if "(" not in text:
+        return None
+    index = _dataset_mod._CHARACTER_INDEX
+    # 记录最外层括号里的内容，作为「作品名」用于校验
+    outer = text.rfind("(")
+    outer_series = _dataset_key(text[outer + 1:].rstrip(") ")) if outer >= 0 else ""
+    candidate = text
+    while "(" in candidate:
+        cut = candidate.rfind("(")
+        candidate = candidate[:cut].strip()
+        if not candidate:
+            break
+        key = _dataset_key(candidate)
+        record = index.get(key) if key else None
+        if record is not None:
+            # 括号里的作品名必须与数据集记录一致（记录没写作品名时跳过校验）
+            record_cp = _dataset_key(record.get("copyright") or "")
+            if not (outer_series and record_cp and outer_series != record_cp):
+                return _dataset_short_name(record.get("name") or candidate, record)
+        # 继续往里剥；循环条件会保证不会退化成裸名
+    return None
 
 
 def _candidate_from_tag(tag, mode, list_lookup, character_list=None):
@@ -619,13 +697,18 @@ def _accept_candidate(candidate: CharacterCandidate) -> bool:
     return candidate.score >= _ACCEPT_THRESHOLD_EXACT
 
 
-def _collect_explicit_candidates(texts) -> list[CharacterCandidate]:
+def _collect_explicit_candidates(texts, bare_mode: str = _BARE_NAME_MODE_OFF
+                                  ) -> list[CharacterCandidate]:
     """第一轮：显式写法（char:xxx 与 name (series)）。强证据，不过通用词过滤。"""
     collected: list[CharacterCandidate] = []
     order = 0
     for _text, tags in _as_tokenised(texts):
         for tag in tags:
-            name = _character_name_from_tag(tag)
+            # 前两个是语法解析（与数据集无关，任何模式都生效）；
+            # 第三个要查数据集，属于「无作品名识别」能力，必须在关闭模式下停用。
+            name = _character_name_from_tag(tag) or _qualified_character_name(tag)
+            if not name and bare_mode != _BARE_NAME_MODE_OFF:
+                name = _exact_dataset_tag_name(tag)
             if not name:
                 continue
             collected.append(CharacterCandidate(
@@ -698,12 +781,20 @@ def _apply_series_guard(candidates: list[CharacterCandidate]) -> list[CharacterC
             kept.append(candidate)
             continue
         series_key = _dataset_key(_WEIGHT_RE.sub("", match.group("series")).strip())
-        rec = _dataset_ref_for_name(candidate.name)
-        record_cp = _dataset_key((rec or {}).get("copyright") or "")
+        rec = _dataset_ref_for_name(candidate.name) or {}
+        record_cp = _dataset_key(rec.get("copyright") or "")
         if series_key and record_cp and series_key != record_cp:
-            # 这里丢弃的候选也要有诊断记录（否则日志里看不到「候选生成过但被护栏滤掉」）
-            _log_candidate_debug(candidate, False)
-            continue
+            # 括号里未必是作品名，也可能是**皮肤名**：danbooru 的
+            # "saori (dress) (blue archive)" 同时有皮肤层与作品层。
+            # 只有当这个限定词既不是记录里的括号段、也不是它的作品名时，才认定
+            # 「作品名对不上」并丢弃；否则会把合法皮肤写法误杀，让提示词掉进裸名
+            # 路径（实测输出 shy.png 而不是 saori_(dress)）。
+            record_parens = _dataset_key(
+                " ".join(re.findall(r"\(([^()]*)\)", rec.get("name") or "")))
+            if series_key not in record_parens.split():
+                # 这里丢弃的候选也要有诊断记录（否则日志里看不到「候选生成过但被护栏滤掉」）
+                _log_candidate_debug(candidate, False)
+                continue
         kept.append(candidate)
     return kept
 
@@ -837,6 +928,13 @@ def _lookup_bare_candidate(tag: str, mode: str,
     key = _dataset_key(stripped)
     if not key or key.isdigit() or not _CHARACTER_NAMES_LOWER:
         return None
+    # 带限定括号（含转义写法）的 tag 不是「裸名」，只能走显式路径。
+    # 否则 "saori (dress)" 会经由「去括号基础名」回退成 saori_(blue_archive)，
+    # 或干脆落到别的分支，与用户写的意思不符。
+    # 注意只拦括号：frieren / kita ikuyo 这类**原生**裸名没有括号，不受影响。
+    if "(" in _unescape_tag(stripped) and not _is_always(key):
+        return None
+
     # §35 用户 override：never = 该裸名永不识别。
     # 显式写法不经过本函数，所以 never 不会影响 char: / "name (series)"。
     if _is_never(key):
@@ -1003,7 +1101,7 @@ def _auto_candidates(texts, bare_mode=_BARE_NAME_MODE_OFF):
     """
     tokenised = _iter_tokens(texts)
 
-    explicit = _collect_explicit_candidates(texts)
+    explicit = _collect_explicit_candidates(texts, bare_mode)
     for candidate in explicit:
         _fill_candidate_dataset_meta(candidate)
     context = _build_character_context(explicit, tokenised)

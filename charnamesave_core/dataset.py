@@ -36,7 +36,12 @@ _LOADING = False
 
 
 def _dataset_key(name: str) -> str:
-    """角色名 -> 匹配键：小写 + 下划线转空格（danbooru 标签与提示词写法对齐）。"""
+    """角色名 -> 匹配键：小写 + 下划线转空格（danbooru 标签与提示词写法对齐）。
+
+    注意：这里**不做反转义**。转义处理由 textparse._unescape_tag 在解析阶段完成，
+    键的长度必须与名字集合保持一致 —— 模糊匹配按「首字母 + 长度」分桶，
+    若键在生成后又被改写长度，分桶与查询就会错位（实测会破坏 kita ikuy 的纠正）。
+    """
     return name.lower().replace("_", " ").strip()
 
 

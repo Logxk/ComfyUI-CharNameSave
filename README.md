@@ -130,6 +130,13 @@ python download_dataset.py --from-file <下载到的 characters.jsonl>
 
 1. **`char:角色名`**（最可靠）：提示词里写 `char:hakurei_reimu`，兼容 `<char:hakurei_reimu>`；可以写多个。
 2. **自动提取**：danbooru 的 `角色名 (作品名)` 结构（`hakurei_reimu_(touhou)` 这种下划线写法同样识别），自动跳过画师 tag（`@画师` / `by 画师` / `by (画师:权重)` / `drawn by 画师` / `artist: 画师`）。
+   - **带皮肤的写法同样支持**：`角色名 (皮肤名) (作品名)`，例如
+     `saori (dress) (blue archive)` → `saori_(dress)_(blue_archive)`；
+     也可以只写 `saori (dress)`。转义写法（`saori \(dress\) \(blue archive\)`）与
+     空格写法等价。
+   - 皮肤/作品两层括号会**从右往左逐层比对数据集**，因此不会把皮肤名误当成作品名，
+     也不会在比对失败时回退成裸名（`saori (bikini)` 这种不存在的皮肤不会被
+     硬套成基础角色 `saori`）。
 3. **无作品名角色识别**（需数据集）：用数据集检索 `Emilia`、`Rem` 这类裸名字。
    - `数据集精确匹配`：忽略大小写与下划线/空格差异。例如 `rem` 会命中数据集里的 `rem_(re:zero)`，但**文件名用短名 `rem`**（去掉括号后缀的写法）；同一角色在数据集里有多个版本时取 `post_count`（热度）最高的那条。
    - `数据集模糊匹配`：在精确匹配之后允许近似匹配（`difflib` 相似度，先用首字母与长度差把候选缩到极小范围再比较），带停用词、最低长度 4、长度差 ≤ 1、首字母相同、`cutoff 0.92` 等约束，避免 `stage` 被误判成角色 `sage`。
