@@ -16,7 +16,8 @@ from .constants import (
 )
 from .dataset import _dataset_key
 from .matching import _auto_candidates
-from .textparse import _clean_path_part, _sanitize_name
+from .textparse import (_clean_path_part, _iter_tags, _sanitize_name,
+                        _strip_weights)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,10 +76,15 @@ def _char_names(texts: list[str], bare_mode: str = _BARE_NAME_MODE_OFF) -> list[
     """
     explicit = []
     for text in texts:
-        for match in _CHAR_TAG_RE.findall(text):
-            name = _sanitize_name(match)
-            if name and name not in explicit:
-                explicit.append(name)
+        # 先按 tag 切分、再在**每个 tag 内部**找 char:。
+        # 直接对整个文本跑正则会把包裹用的方括号带进角色名
+        # （实测 "[[char:hakurei_reimu]]" -> "hakurei_reimu]]"），
+        # 因为 _CHAR_TAG_RE 只排除 <>、逗号与换行，不排除 `]`。
+        for tag in _iter_tags(text):
+            for match in _CHAR_TAG_RE.findall(tag):
+                name = _sanitize_name(_strip_weights(match))
+                if name and name not in explicit:
+                    explicit.append(name)
     if explicit:
         return _dedupe_character_names(explicit)[:_MAX_AUTO_NAMES]
 

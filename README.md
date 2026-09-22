@@ -130,6 +130,9 @@ python download_dataset.py --from-file <下载到的 characters.jsonl>
 
 1. **`char:角色名`**（最可靠）：提示词里写 `char:hakurei_reimu`，兼容 `<char:hakurei_reimu>`；可以写多个。
 2. **自动提取**：danbooru 的 `角色名 (作品名)` 结构（`hakurei_reimu_(touhou)` 这种下划线写法同样识别），自动跳过画师 tag（`@画师` / `by 画师` / `by (画师:权重)` / `drawn by 画师` / `artist: 画师`）。
+   - **方括号包裹会被剥掉**：`[[artist:siu_(siu0207)]]` / `[artist:mana_(remana)]`
+     与不加方括号等价，画师标记照常被过滤；`[[char:hakurei_reimu]]` 同样可用。
+     只剥**成对**的外层方括号，`[a` 这种不成对的保持原样。
    - **带皮肤的写法同样支持**：`角色名 (皮肤名) (作品名)`，例如
      `saori (dress) (blue archive)` → `saori_(dress)_(blue_archive)`；
      也可以只写 `saori (dress)`。转义写法（`saori \(dress\) \(blue archive\)`）与
